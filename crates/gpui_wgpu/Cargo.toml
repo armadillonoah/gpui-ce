@@ -40,6 +40,12 @@ font-kit = { version = "0.14.1-zed", package = "zed-font-kit", optional = true }
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 pollster.workspace = true
 
+[target.'cfg(target_os = "windows")'.dependencies]
+# The Windows renderer compiles the texture-surface path directly. Keep the
+# gpui scene/API fields available even when gpui_wgpu is built or tested as a
+# standalone workspace package rather than through gpui_windows/wgpu.
+gpui = { workspace = true, features = ["wgpu-surfaces"] }
+
 [target.'cfg(target_family = "wasm")'.dependencies]
 wasm-bindgen.workspace = true
 wasm-bindgen-futures.workspace = true

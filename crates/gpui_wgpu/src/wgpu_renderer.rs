@@ -167,7 +167,9 @@ struct WgpuResources {
     bind_group_layouts: WgpuBindGroupLayouts,
     atlas_sampler: wgpu::Sampler,
     surface_sampler: wgpu::Sampler,
-    #[allow(dead_code)]
+    /// Alignment-strided [`SurfaceParams`] slots. Every surface drawn in a
+    /// frame gets a distinct range so queued writes cannot overwrite params
+    /// used by earlier draws before the command encoder is submitted.
     surface_uniform_buffer: wgpu::Buffer,
     /// One reused uniform buffer holding [`BlurParams`] for every blur pass in a frame, each at a
     /// distinct (alignment-strided) offset. Avoids allocating a buffer per pass; distinct offsets
@@ -222,6 +224,10 @@ impl WgpuResources {
 /// render inline (unblurred at the inner level) rather than allocating unbounded VRAM.
 const MAX_FILTER_DEPTH: usize = 2;
 
+/// Initial number of [`SurfaceParams`] slots. The buffer grows geometrically
+/// when a scene contains more surfaces, so ordinary frames allocate nothing.
+const INITIAL_SURFACE_PARAMS_SLOTS: u64 = 64;
+
 /// Number of [`BlurParams`] slots in the shared blur-params buffer (one per blur pass per frame).
 /// Each frame uses 4 passes per backdrop/group plus one blit; 256 covers dozens of filters.
 const BLUR_PARAMS_SLOTS: u64 = 256;
@@ -244,6 +250,11 @@ pub struct WgpuRenderer {
     instance_buffer_capacity: u64,
     max_buffer_size: u64,
     storage_buffer_alignment: u64,
+    /// Stride, capacity, and per-frame cursor for alignment-safe
+    /// [`SurfaceParams`] ranges in `surface_uniform_buffer`.
+    surface_params_stride: u64,
+    surface_params_capacity: u64,
+    surface_params_slot: std::cell::Cell<u64>,
     /// Stride between [`BlurParams`] slots in `blur_params_buffer`, and a per-frame bump cursor
     /// (in slots) handed out to blur passes. Cell so the `&self` blur helpers can advance it.
     blur_params_stride: u64,
@@ -485,14 +496,17 @@ impl WgpuRenderer {
             ..Default::default()
         });
 
+        let uniform_alignment = device.limits().min_uniform_buffer_offset_alignment as u64;
+        let surface_params_stride =
+            (std::mem::size_of::<SurfaceParams>() as u64).next_multiple_of(uniform_alignment);
+        let surface_params_capacity = INITIAL_SURFACE_PARAMS_SLOTS;
         let surface_uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("surface_uniform_buffer"),
-            size: std::mem::size_of::<SurfaceParams>() as u64,
+            size: surface_params_stride * surface_params_capacity,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
-        let uniform_alignment = device.limits().min_uniform_buffer_offset_alignment as u64;
         // Shared blur-params buffer: BLUR_PARAMS_SLOTS slots, each one alignment stride apart.
         let blur_params_stride =
             (std::mem::size_of::<BlurParams>() as u64).next_multiple_of(uniform_alignment);
@@ -622,6 +636,9 @@ impl WgpuRenderer {
             instance_buffer_capacity: initial_instance_buffer_capacity,
             max_buffer_size,
             storage_buffer_alignment,
+            surface_params_stride,
+            surface_params_capacity,
+            surface_params_slot: std::cell::Cell::new(0),
             blur_params_stride,
             blur_params_slot: std::cell::Cell::new(0),
             rendering_params,
@@ -1398,6 +1415,10 @@ impl WgpuRenderer {
 
         self.atlas.before_frame();
 
+        if !self.ensure_surface_params_capacity(scene.surfaces.len() as u64) {
+            return false;
+        }
+
         let frame = match self.resources().surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame) => frame,
             wgpu::CurrentSurfaceTexture::Suboptimal(frame) => {
@@ -1492,6 +1513,8 @@ impl WgpuRenderer {
 
         loop {
             let mut instance_offset: u64 = 0;
+            // Reset the surface-params bump cursor each (re)render of the scene.
+            self.surface_params_slot.set(0);
             // Reset the blur-params bump cursor each (re)render of the scene.
             self.blur_params_slot.set(0);
             let mut overflow = false;
@@ -1867,9 +1890,17 @@ impl WgpuRenderer {
                 content_mask: surface.content_mask.bounds.into(),
             };
 
+            let slot = self.surface_params_slot.get();
+            let offset = uniform_slot_offset(
+                slot,
+                self.surface_params_stride,
+                self.surface_params_capacity,
+            )
+            .expect("surface params buffer was sized for every surface in the scene");
+            self.surface_params_slot.set(slot + 1);
             resources.queue.write_buffer(
                 &resources.surface_uniform_buffer,
-                0,
+                offset,
                 bytemuck::bytes_of(&params),
             );
 
@@ -1881,7 +1912,11 @@ impl WgpuRenderer {
                     entries: &[
                         wgpu::BindGroupEntry {
                             binding: 0,
-                            resource: resources.surface_uniform_buffer.as_entire_binding(),
+                            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                                buffer: &resources.surface_uniform_buffer,
+                                offset,
+                                size: NonZeroU64::new(std::mem::size_of::<SurfaceParams>() as u64),
+                            }),
                         },
                         wgpu::BindGroupEntry {
                             binding: 1,
@@ -2420,6 +2455,38 @@ impl WgpuRenderer {
         self.instance_buffer_capacity = new_capacity;
     }
 
+    fn ensure_surface_params_capacity(&mut self, required_slots: u64) -> bool {
+        let max_slots = self.max_buffer_size / self.surface_params_stride;
+        let Some(new_capacity) =
+            next_uniform_slot_capacity(self.surface_params_capacity, required_slots, max_slots)
+        else {
+            log::error!(
+                "scene has {} surfaces, exceeding the device limit of {} surface parameter slots",
+                required_slots,
+                max_slots
+            );
+            return false;
+        };
+        if new_capacity == self.surface_params_capacity {
+            return true;
+        }
+
+        let size = self.surface_params_stride * new_capacity;
+        let buffer = self
+            .resources()
+            .device
+            .create_buffer(&wgpu::BufferDescriptor {
+                label: Some("surface_uniform_buffer"),
+                size,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+        self.resources_mut().surface_uniform_buffer = buffer;
+        self.surface_params_capacity = new_capacity;
+        log::info!("increased surface params capacity to {}", new_capacity);
+        true
+    }
+
     fn write_to_instance_buffer(
         &self,
         instance_offset: &mut u64,
@@ -2674,5 +2741,53 @@ impl RenderingParameters {
             grayscale_enhanced_contrast,
             subpixel_enhanced_contrast,
         }
+    }
+}
+
+fn next_uniform_slot_capacity(current: u64, required: u64, maximum: u64) -> Option<u64> {
+    if required <= current {
+        return Some(current);
+    }
+    if required > maximum {
+        return None;
+    }
+
+    Some(
+        required
+            .checked_next_power_of_two()
+            .unwrap_or(maximum)
+            .min(maximum),
+    )
+}
+
+fn uniform_slot_offset(slot: u64, stride: u64, capacity: u64) -> Option<u64> {
+    (slot < capacity)
+        .then(|| slot.checked_mul(stride))
+        .flatten()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{next_uniform_slot_capacity, uniform_slot_offset};
+
+    #[test]
+    fn surface_param_slots_have_distinct_aligned_offsets() {
+        let stride = 256;
+        let capacity = 4;
+        let offsets = (0..capacity)
+            .map(|slot| uniform_slot_offset(slot, stride, capacity).unwrap())
+            .collect::<Vec<_>>();
+
+        assert_eq!(offsets, vec![0, 256, 512, 768]);
+        assert!(offsets.iter().all(|offset| offset % stride == 0));
+        assert_eq!(uniform_slot_offset(capacity, stride, capacity), None);
+    }
+
+    #[test]
+    fn surface_param_capacity_grows_geometrically_with_a_hard_limit() {
+        assert_eq!(next_uniform_slot_capacity(64, 64, 1024), Some(64));
+        assert_eq!(next_uniform_slot_capacity(64, 65, 1024), Some(128));
+        assert_eq!(next_uniform_slot_capacity(64, 900, 1000), Some(1000));
+        assert_eq!(next_uniform_slot_capacity(64, 1001, 1000), None);
     }
 }
