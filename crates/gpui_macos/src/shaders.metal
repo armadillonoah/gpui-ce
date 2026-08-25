@@ -1244,6 +1244,42 @@ float4 fill_color(Background background,
 
       break;
     }
+    case 4: {
+        // Radial gradient. Offset from the centre, scaled by the per-axis
+        // radii so an ellipse falls out of the same distance test.
+        float2 rel = (position - float2(bounds.origin.x, bounds.origin.y))
+                   / float2(bounds.size.width, bounds.size.height);
+        float2 offset = rel - float2(background.center_x, background.center_y);
+        float2 radii = max(float2(background.radius_x, background.radius_y), 1e-6);
+        float t = length(offset / radii);
+
+        t = (t - background.colors[0].percentage)
+            / max(background.colors[1].percentage - background.colors[0].percentage, 1e-6);
+        t = clamp(t, 0.0, 1.0);
+
+        switch (background.color_space) {
+            case 0:
+                color = mix(color0, color1, t);
+                break;
+            case 1: {
+                float4 oklab_color = mix(color0, color1, t);
+                color = oklab_to_srgb(oklab_color);
+                break;
+            }
+        }
+
+        // Dither to reduce banding in gradients (especially dark/alpha).
+        {
+            float2 seed = position * 0.6180339887;
+            float r1 = fract(sin(dot(seed, float2(12.9898, 78.233))) * 43758.5453);
+            float r2 = fract(sin(dot(seed, float2(39.3460, 11.135))) * 24634.6345);
+            float tri = r1 + r2 - 1.0;
+            color.rgb += tri * 2.0 / 255.0;
+            color.a   += tri * 3.0 / 255.0;
+        }
+
+        break;
+    }
     case 2: {
         float gradient_angle_or_pattern_height = background.gradient_angle_or_pattern_height;
         float pattern_width = (gradient_angle_or_pattern_height / 65535.0f) / 255.0f;

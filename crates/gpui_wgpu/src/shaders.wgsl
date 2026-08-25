@@ -135,6 +135,7 @@ struct Background {
     // 1u is LinearGradient
     // 2u is PatternSlash
     // 3u is Checkerboard
+    // 4u is RadialGradient
     tag: u32,
     // 0u is sRGB linear color
     // 1u is Oklab color
@@ -143,6 +144,10 @@ struct Background {
     gradient_angle_or_pattern_height: f32,
     colors: array<LinearColorStop, 2>,
     pad: u32,
+    center_x: f32,
+    center_y: f32,
+    radius_x: f32,
+    radius_y: f32,
 }
 
 struct AtlasTextureId {
@@ -407,7 +412,7 @@ fn prepare_gradient_color(tag: u32, color_space: u32,
 
     if (tag == 0u || tag == 2u || tag == 3u) {
         result.solid = hsla_to_rgba(solid);
-    } else if (tag == 1u) {
+    } else if (tag == 1u || tag == 4u) {
         // The hsla_to_rgba is returns a linear sRGB color
         result.color0 = hsla_to_rgba(colors[0].color);
         result.color1 = hsla_to_rgba(colors[1].color);
@@ -476,6 +481,60 @@ fn gradient_color(background: Background, position: vec2<f32>, bounds: Bounds,
                     let oklab_color = mix(color0, color1, t);
                     background_color = oklab_to_linear_srgb(oklab_color);
                 }
+            }
+
+            // Dither to reduce banding in gradients (especially dark/alpha).
+            // Triangular-distributed noise breaks up 8-bit quantization steps.
+            // Ported from the HLSL and Metal backends, which already do this;
+            // the wgpu backend was the only one without it.
+            {
+                let seed = position * 0.6180339887;
+                let r1 = fract(sin(dot(seed, vec2<f32>(12.9898, 78.233))) * 43758.5453);
+                let r2 = fract(sin(dot(seed, vec2<f32>(39.3460, 11.135))) * 24634.6345);
+                let tri = r1 + r2 - 1.0;
+                background_color = vec4<f32>(
+                    background_color.rgb + tri * 2.0 / 255.0,
+                    background_color.a + tri * 3.0 / 255.0,
+                );
+            }
+        }
+        case 4u: {
+            // Radial gradient background.
+            // Normalized offset from the gradient's center, scaled by the
+            // per-axis radii so an ellipse falls out of the same distance test.
+            let relative = (position - bounds.origin) / bounds.size;
+            let offset = relative - vec2<f32>(background.center_x, background.center_y);
+            let radii = max(vec2<f32>(background.radius_x, background.radius_y), vec2<f32>(1e-6));
+            var t = length(offset / radii);
+
+            let stop0_percentage = background.colors[0].percentage;
+            let stop1_percentage = background.colors[1].percentage;
+            t = (t - stop0_percentage) / max(stop1_percentage - stop0_percentage, 1e-6);
+            t = clamp(t, 0.0, 1.0);
+
+            switch (background.color_space) {
+                default: {
+                    background_color = srgba_to_linear(mix(color0, color1, t));
+                }
+                case 1u: {
+                    let oklab_color = mix(color0, color1, t);
+                    background_color = oklab_to_linear_srgb(oklab_color);
+                }
+            }
+
+            // Dither to reduce banding in gradients (especially dark/alpha).
+            // Triangular-distributed noise breaks up 8-bit quantization steps.
+            // Ported from the HLSL and Metal backends, which already do this;
+            // the wgpu backend was the only one without it.
+            {
+                let seed = position * 0.6180339887;
+                let r1 = fract(sin(dot(seed, vec2<f32>(12.9898, 78.233))) * 43758.5453);
+                let r2 = fract(sin(dot(seed, vec2<f32>(39.3460, 11.135))) * 24634.6345);
+                let tri = r1 + r2 - 1.0;
+                background_color = vec4<f32>(
+                    background_color.rgb + tri * 2.0 / 255.0,
+                    background_color.a + tri * 3.0 / 255.0,
+                );
             }
         }
         case 2u: {

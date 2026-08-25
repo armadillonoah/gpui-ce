@@ -236,6 +236,7 @@ pub(crate) enum BackgroundTag {
     LinearGradient = 1,
     PatternSlash = 2,
     Checkerboard = 3,
+    RadialGradient = 4,
 }
 
 /// A color space for color interpolation.
@@ -273,6 +274,13 @@ pub struct Background {
     pub(crate) colors: [LinearColorStop; 2],
     /// Padding for alignment for repr(C) layout.
     pad: u32,
+    /// Radial gradient center, normalized to the element's bounds.
+    pub(crate) center_x: f32,
+    pub(crate) center_y: f32,
+    /// Radial gradient radii, normalized to the element's bounds. Separate x
+    /// and y give elliptical gradients, matching CSS `radial-gradient`.
+    pub(crate) radius_x: f32,
+    pub(crate) radius_y: f32,
 }
 
 impl std::fmt::Debug for Background {
@@ -283,6 +291,16 @@ impl std::fmt::Debug for Background {
                 f,
                 "LinearGradient({}, {:?}, {:?})",
                 self.gradient_angle_or_pattern_height, self.colors[0], self.colors[1]
+            ),
+            BackgroundTag::RadialGradient => write!(
+                f,
+                "RadialGradient(center=({}, {}), radius=({}, {}), {:?}, {:?})",
+                self.center_x,
+                self.center_y,
+                self.radius_x,
+                self.radius_y,
+                self.colors[0],
+                self.colors[1]
             ),
             BackgroundTag::PatternSlash => write!(
                 f,
@@ -308,6 +326,10 @@ impl Default for Background {
             gradient_angle_or_pattern_height: 0.0,
             colors: [LinearColorStop::default(), LinearColorStop::default()],
             pad: 0,
+            center_x: 0.5,
+            center_y: 0.5,
+            radius_x: 0.5,
+            radius_y: 0.5,
         }
     }
 }
@@ -360,6 +382,30 @@ pub fn linear_gradient(
         tag: BackgroundTag::LinearGradient,
         gradient_angle_or_pattern_height: angle,
         colors: [from.into(), to.into()],
+        ..Default::default()
+    }
+}
+
+/// Creates a radial gradient background.
+///
+/// `center` is the gradient's center, and `radius` its extent, both normalized
+/// to the element's bounds (`0.0` to `1.0`). Separate x and y radii give an
+/// ellipse.
+///
+/// <https://developer.mozilla.org/en-US/docs/Web/CSS/gradient/radial-gradient>
+pub fn radial_gradient(
+    center: (f32, f32),
+    radius: (f32, f32),
+    from: impl Into<LinearColorStop>,
+    to: impl Into<LinearColorStop>,
+) -> Background {
+    Background {
+        tag: BackgroundTag::RadialGradient,
+        colors: [from.into(), to.into()],
+        center_x: center.0,
+        center_y: center.1,
+        radius_x: radius.0,
+        radius_y: radius.1,
         ..Default::default()
     }
 }
@@ -431,7 +477,9 @@ impl Background {
     pub fn is_transparent(&self) -> bool {
         match self.tag {
             BackgroundTag::Solid => self.solid.a == 0.,
-            BackgroundTag::LinearGradient => self.colors.iter().all(|c| c.color.a == 0.),
+            BackgroundTag::LinearGradient | BackgroundTag::RadialGradient => {
+                self.colors.iter().all(|c| c.color.a == 0.)
+            }
             BackgroundTag::PatternSlash => self.solid.a == 0.,
             BackgroundTag::Checkerboard => self.solid.a == 0.,
         }

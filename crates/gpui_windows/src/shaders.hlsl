@@ -60,6 +60,10 @@ struct Background {
     float gradient_angle_or_pattern_height;
     LinearColorStop colors[2];
     uint pad;
+    float center_x;
+    float center_y;
+    float radius_x;
+    float radius_y;
 };
 
 struct GradientColor {
@@ -313,7 +317,7 @@ GradientColor prepare_gradient_color(uint tag, uint color_space, Hsla solid, Lin
     GradientColor output;
     if (tag == 0 || tag == 2 || tag == 3) {
         output.solid = hsla_to_rgba(solid);
-    } else if (tag == 1) {
+    } else if (tag == 1 || tag == 4) {
         output.color0 = hsla_to_rgba(colors[0].color);
         output.color1 = hsla_to_rgba(colors[1].color);
 
@@ -396,6 +400,41 @@ float4 gradient_color(Background background,
                 float r1 = frac(sin(dot(seed, float2(12.9898, 78.233))) * 43758.5453);
                 float r2 = frac(sin(dot(seed, float2(39.3460, 11.135))) * 24634.6345);
                 float tri = r1 + r2 - 1.0; // triangular PDF, range [-1, +1]
+                color.rgb += tri * 2.0 / 255.0;
+                color.a   += tri * 3.0 / 255.0;
+            }
+
+            break;
+        }
+        case 4: {
+            // Radial gradient. Offset from the centre, scaled by the per-axis
+            // radii so an ellipse falls out of the same distance test.
+            float2 rel = (position - bounds.origin) / bounds.size;
+            float2 offset = rel - float2(background.center_x, background.center_y);
+            float2 radii = max(float2(background.radius_x, background.radius_y), 1e-6);
+            float t = length(offset / radii);
+
+            t = (t - background.colors[0].percentage)
+                / max(background.colors[1].percentage - background.colors[0].percentage, 1e-6);
+            t = clamp(t, 0.0, 1.0);
+
+            switch (background.color_space) {
+                case 0:
+                    color = lerp(color0, color1, t);
+                    break;
+                case 1: {
+                    float4 oklab_color = lerp(color0, color1, t);
+                    color = oklab_to_srgb(oklab_color);
+                    break;
+                }
+            }
+
+            // Dither to reduce banding in gradients (especially dark/alpha).
+            {
+                float2 seed = position * 0.6180339887;
+                float r1 = frac(sin(dot(seed, float2(12.9898, 78.233))) * 43758.5453);
+                float r2 = frac(sin(dot(seed, float2(39.3460, 11.135))) * 24634.6345);
+                float tri = r1 + r2 - 1.0;
                 color.rgb += tri * 2.0 / 255.0;
                 color.a   += tri * 3.0 / 255.0;
             }
