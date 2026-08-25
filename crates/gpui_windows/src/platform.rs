@@ -75,6 +75,10 @@ pub(crate) struct WindowsPlatformState {
     /// Shared with each window to coordinate draws across windows on the UI
     /// thread; see [`DrawCoordinator`].
     pub(crate) draw_coordinator: Rc<DrawCoordinator>,
+    /// Additional device features/limits requested by the application before
+    /// opening its first wgpu-backed window.
+    #[cfg(feature = "wgpu")]
+    gpu_requirements: RefCell<Option<gpui_wgpu::WgpuDeviceRequirements>>,
     #[cfg(not(feature = "wgpu"))]
     directx_devices: RefCell<Option<DirectXDevices>>,
 }
@@ -103,6 +107,8 @@ impl WindowsPlatformState {
             current_cursor: Cell::new(current_cursor),
             cursor_visible: Arc::new(AtomicBool::new(true)),
             draw_coordinator: Rc::new(DrawCoordinator::new()),
+            #[cfg(feature = "wgpu")]
+            gpu_requirements: RefCell::new(None),
             #[cfg(not(feature = "wgpu"))]
             directx_devices: RefCell::new(directx_devices),
             menus: RefCell::new(Vec::new()),
@@ -255,6 +261,8 @@ impl WindowsPlatform {
             main_receiver: self.inner.main_receiver.clone(),
             platform_window_handle: self.handle,
             disable_direct_composition: self.disable_direct_composition,
+            #[cfg(feature = "wgpu")]
+            gpu_requirements: self.inner.state.gpu_requirements.borrow().clone(),
             #[cfg(not(feature = "wgpu"))]
             directx_devices: self.inner.state.directx_devices.borrow().clone().unwrap(),
             invalidate_devices: self.invalidate_devices.clone(),
@@ -546,6 +554,15 @@ impl Platform for WindowsPlatform {
         let active_window_hwnd = unsafe { GetActiveWindow() };
         self.window_from_hwnd(active_window_hwnd)
             .map(|inner| inner.handle)
+    }
+
+    #[cfg(feature = "wgpu")]
+    fn set_gpu_requirements(&self, requirements: Box<dyn std::any::Any>) {
+        if let Ok(requirements) = requirements.downcast::<gpui_wgpu::WgpuDeviceRequirements>() {
+            *self.inner.state.gpu_requirements.borrow_mut() = Some(*requirements);
+        } else {
+            log::warn!("set_gpu_requirements: unexpected type, expected WgpuDeviceRequirements");
+        }
     }
 
     fn open_window(
@@ -1167,6 +1184,8 @@ pub(crate) struct WindowCreationInfo {
     pub(crate) main_receiver: PriorityQueueReceiver<RunnableVariant>,
     pub(crate) platform_window_handle: HWND,
     pub(crate) disable_direct_composition: bool,
+    #[cfg(feature = "wgpu")]
+    pub(crate) gpu_requirements: Option<gpui_wgpu::WgpuDeviceRequirements>,
     #[cfg(not(feature = "wgpu"))]
     pub(crate) directx_devices: DirectXDevices,
     /// Flag to instruct the `VSyncProvider` thread to invalidate the directx devices

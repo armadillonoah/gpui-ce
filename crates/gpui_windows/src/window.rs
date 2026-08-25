@@ -118,6 +118,7 @@ pub(crate) struct WindowsWindowInner {
 impl WindowsWindowState {
     fn new(
         hwnd: HWND,
+        #[cfg(feature = "wgpu")] gpu_requirements: Option<gpui_wgpu::WgpuDeviceRequirements>,
         #[cfg(not(feature = "wgpu"))] directx_devices: &DirectXDevices,
         window_params: &CREATESTRUCTW,
         current_cursor: Option<HCURSOR>,
@@ -155,7 +156,7 @@ impl WindowsWindowState {
                 preferred_present_mode: Some(wgpu::PresentMode::Mailbox),
             },
             None,
-            None,
+            gpu_requirements,
         )
         .context("Creating Wgpu renderer")?;
         #[cfg(not(feature = "wgpu"))]
@@ -274,6 +275,8 @@ impl WindowsWindowInner {
     fn new(context: &mut WindowCreateContext, hwnd: HWND, cs: &CREATESTRUCTW) -> Result<Rc<Self>> {
         let state = WindowsWindowState::new(
             hwnd,
+            #[cfg(feature = "wgpu")]
+            context.gpu_requirements.clone(),
             #[cfg(not(feature = "wgpu"))]
             &context.directx_devices,
             cs,
@@ -431,6 +434,8 @@ struct WindowCreateContext {
     main_receiver: PriorityQueueReceiver<RunnableVariant>,
     platform_window_handle: HWND,
     appearance: WindowAppearance,
+    #[cfg(feature = "wgpu")]
+    gpu_requirements: Option<gpui_wgpu::WgpuDeviceRequirements>,
     #[cfg(not(feature = "wgpu"))]
     disable_direct_composition: bool,
     #[cfg(not(feature = "wgpu"))]
@@ -463,6 +468,8 @@ impl WindowsWindow {
             main_receiver,
             platform_window_handle,
             disable_direct_composition,
+            #[cfg(feature = "wgpu")]
+            gpu_requirements,
             #[cfg(not(feature = "wgpu"))]
             directx_devices,
             invalidate_devices,
@@ -552,6 +559,8 @@ impl WindowsWindow {
             main_receiver,
             platform_window_handle,
             appearance,
+            #[cfg(feature = "wgpu")]
+            gpu_requirements,
             #[cfg(not(feature = "wgpu"))]
             disable_direct_composition,
             #[cfg(not(feature = "wgpu"))]
