@@ -237,6 +237,7 @@ pub(crate) enum BackgroundTag {
     PatternSlash = 2,
     Checkerboard = 3,
     RadialGradient = 4,
+    RadialGradient3 = 5,
 }
 
 /// A color space for color interpolation.
@@ -301,6 +302,18 @@ impl std::fmt::Debug for Background {
                 self.radius_y,
                 self.colors[0],
                 self.colors[1]
+            ),
+            BackgroundTag::RadialGradient3 => write!(
+                f,
+                "RadialGradient3(center=({}, {}), radius=({}, {}), {:?}, {:?}, LinearColorStop {{ color: {:?}, percentage: {} }})",
+                self.center_x,
+                self.center_y,
+                self.radius_x,
+                self.radius_y,
+                self.colors[0],
+                self.colors[1],
+                self.solid,
+                self.gradient_angle_or_pattern_height
             ),
             BackgroundTag::PatternSlash => write!(
                 f,
@@ -410,6 +423,35 @@ pub fn radial_gradient(
     }
 }
 
+/// Creates a three-stop radial gradient background.
+///
+/// `center` is the gradient's center, and `radius` its extent, both normalized
+/// to the element's bounds (`0.0` to `1.0`). Separate x and y radii give an
+/// ellipse. The three color stops are interpolated piecewise in percentage
+/// order without adding storage to [`Background`].
+///
+/// <https://developer.mozilla.org/en-US/docs/Web/CSS/gradient/radial-gradient>
+pub fn radial_gradient_3(
+    center: (f32, f32),
+    radius: (f32, f32),
+    first: impl Into<LinearColorStop>,
+    middle: impl Into<LinearColorStop>,
+    last: impl Into<LinearColorStop>,
+) -> Background {
+    let last = last.into();
+    Background {
+        tag: BackgroundTag::RadialGradient3,
+        solid: last.color,
+        gradient_angle_or_pattern_height: last.percentage,
+        colors: [first.into(), middle.into()],
+        center_x: center.0,
+        center_y: center.1,
+        radius_x: radius.0,
+        radius_y: radius.1,
+        ..Default::default()
+    }
+}
+
 /// A color stop in a linear gradient.
 ///
 /// <https://developer.mozilla.org/en-US/docs/Web/CSS/gradient/linear-gradient#linear-color-stop>
@@ -480,6 +522,9 @@ impl Background {
             BackgroundTag::LinearGradient | BackgroundTag::RadialGradient => {
                 self.colors.iter().all(|c| c.color.a == 0.)
             }
+            BackgroundTag::RadialGradient3 => {
+                self.solid.a == 0. && self.colors.iter().all(|c| c.color.a == 0.)
+            }
             BackgroundTag::PatternSlash => self.solid.a == 0.,
             BackgroundTag::Checkerboard => self.solid.a == 0.,
         }
@@ -542,6 +587,46 @@ mod tests {
         assert_eq!(background.opacity(0.5).colors[1], to.opacity(0.5));
         assert!(!background.is_transparent());
         assert!(background.opacity(0.0).is_transparent());
+    }
+
+    #[test]
+    fn test_background_three_stop_radial_gradient_reuses_existing_storage() {
+        let first = linear_color_stop(rgba(0xff0099ff), 0.0);
+        let middle = linear_color_stop(rgba(0x00ff99cc), 0.35);
+        let last = linear_color_stop(rgba(0x00009980), 1.0);
+        let background = radial_gradient_3((0.25, 0.75), (0.5, 0.8), first, middle, last);
+
+        assert_eq!(background.tag, BackgroundTag::RadialGradient3);
+        assert_eq!((background.center_x, background.center_y), (0.25, 0.75));
+        assert_eq!((background.radius_x, background.radius_y), (0.5, 0.8));
+        assert_eq!(background.colors, [first, middle]);
+        assert_eq!(background.solid, last.color);
+        assert_eq!(background.gradient_angle_or_pattern_height, last.percentage);
+        assert_eq!(background.opacity(0.5).colors[0], first.opacity(0.5));
+        assert_eq!(background.opacity(0.5).colors[1], middle.opacity(0.5));
+        let last_color: Hsla = last.color.into();
+        assert_eq!(
+            background.opacity(0.5).solid,
+            last_color.opacity(0.5).into()
+        );
+        assert!(!background.is_transparent());
+        assert!(background.opacity(0.0).is_transparent());
+    }
+
+    #[test]
+    fn three_stop_radial_gradient_does_not_grow_background() {
+        assert_eq!(std::mem::size_of::<Background>(), 88);
+        assert_eq!(std::mem::align_of::<Background>(), 4);
+        assert_eq!(std::mem::offset_of!(Background, tag), 0);
+        assert_eq!(std::mem::offset_of!(Background, color_space), 4);
+        assert_eq!(std::mem::offset_of!(Background, solid), 8);
+        assert_eq!(
+            std::mem::offset_of!(Background, gradient_angle_or_pattern_height),
+            24
+        );
+        assert_eq!(std::mem::offset_of!(Background, colors), 28);
+        assert_eq!(std::mem::offset_of!(Background, center_x), 72);
+        assert_eq!(std::mem::offset_of!(Background, radius_y), 84);
     }
 
     #[test]

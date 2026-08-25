@@ -136,8 +136,9 @@ struct Background {
     // 2u is PatternSlash
     // 3u is Checkerboard
     // 4u is RadialGradient
+    // 5u is RadialGradient3
     tag: u32,
-    // 0u is sRGB linear color
+    // 0u is sRGB-coded color
     // 1u is Oklab color
     color_space: u32,
     solid: Hsla,
@@ -243,7 +244,7 @@ fn srgba_to_linear(color: vec4<f32>) -> vec4<f32> {
     return vec4<f32>(srgb_to_linear(color.rgb), color.a);
 }
 
-/// Hsla to linear RGBA conversion.
+/// Hsla to sRGB-coded RGBA conversion.
 fn hsla_to_rgba(hsla: Hsla) -> vec4<f32> {
     let h = hsla.h * 6.0; // Now, it's an angle but scaled in [0, 6) range
     let s = hsla.s;
@@ -412,30 +413,91 @@ fn prepare_gradient_color(tag: u32, color_space: u32,
 
     if (tag == 0u || tag == 2u || tag == 3u) {
         result.solid = hsla_to_rgba(solid);
-    } else if (tag == 1u || tag == 4u) {
-        // The hsla_to_rgba is returns a linear sRGB color
+    } else if (tag == 1u || tag == 4u || tag == 5u) {
+        // hsla_to_rgba already produces the sRGB-coded values expected by
+        // CSS/default interpolation and the non-sRGB swapchain target.
         result.color0 = hsla_to_rgba(colors[0].color);
         result.color1 = hsla_to_rgba(colors[1].color);
+        if (tag == 5u) {
+            // RadialGradient3 reuses Background.solid for its third color.
+            result.solid = hsla_to_rgba(solid);
+        }
 
         // Prepare color space in vertex for avoid conversion
         // in fragment shader for performance reasons
-        if (color_space == 0u) {
-            // sRGB
-            result.color0 = linear_to_srgba(result.color0);
-            result.color1 = linear_to_srgba(result.color1);
-        } else if (color_space == 1u) {
+        if (color_space == 1u) {
             // Oklab
             result.color0 = linear_srgb_to_oklab(result.color0);
             result.color1 = linear_srgb_to_oklab(result.color1);
+            if (tag == 5u) {
+                result.solid = linear_srgb_to_oklab(result.solid);
+            }
         }
     }
 
     return result;
 }
 
+fn interpolate_gradient_color(
+    color_space: u32,
+    start_color: vec4<f32>,
+    end_color: vec4<f32>,
+    t: f32,
+) -> vec4<f32> {
+    let alpha = mix(start_color.a, end_color.a, t);
+    let premultiplied = mix(
+        start_color.rgb * start_color.a,
+        end_color.rgb * end_color.a,
+        t,
+    );
+    var interpolated = vec4<f32>(0.0, 0.0, 0.0, alpha);
+    if (alpha > 0.0) {
+        interpolated = vec4<f32>(premultiplied / alpha, alpha);
+    }
+    if (color_space == 1u) {
+        return oklab_to_linear_srgb(interpolated);
+    }
+    return interpolated;
+}
+
+// Apply the same deterministic triangular dither to every gradient kind.
+// Alpha endpoints remain exact: dithering transparent alpha creates ghost
+// pixels, while dithering opaque alpha makes an otherwise opaque fill porous.
+fn dither_gradient(
+    color: vec4<f32>,
+    position: vec2<f32>,
+    dither_strength: f32,
+) -> vec4<f32> {
+    if (dither_strength <= 0.0) {
+        return color;
+    }
+    let seed = position * 0.6180339887;
+    let r1 = fract(sin(dot(seed, vec2<f32>(12.9898, 78.233))) * 43758.5453);
+    let r2 = fract(sin(dot(seed, vec2<f32>(39.3460, 11.135))) * 24634.6345);
+    let tri = r1 + r2 - 1.0;
+    let alpha_tri = r1 - r2;
+    let rgb = clamp(
+        color.rgb + tri * (1.0 / 255.0) * dither_strength,
+        vec3<f32>(0.0),
+        vec3<f32>(1.0),
+    );
+    var alpha = color.a;
+    if (alpha > 0.0 && alpha < 1.0) {
+        // This second TPDF combination is uncorrelated with the RGB noise, so
+        // source-alpha multiplication does not introduce a brightness bias.
+        alpha = clamp(
+            alpha + alpha_tri * (1.0 / 255.0) * dither_strength,
+            0.0,
+            1.0,
+        );
+    }
+    return vec4<f32>(rgb, alpha);
+}
+
 fn gradient_color(background: Background, position: vec2<f32>, bounds: Bounds,
     solid_color: vec4<f32>, color0: vec4<f32>, color1: vec4<f32>) -> vec4<f32> {
     var background_color = vec4<f32>(0.0);
+    var dither_strength = 0.0;
 
     switch (background.tag) {
         default: {
@@ -470,33 +532,15 @@ fn gradient_color(background: Background, position: vec2<f32>, bounds: Bounds,
             }
 
             // Adjust t based on the stop percentages
-            t = (t - stop0_percentage) / (stop1_percentage - stop0_percentage);
-            t = clamp(t, 0.0, 1.0);
-
-            switch (background.color_space) {
-                default: {
-                    background_color = srgba_to_linear(mix(color0, color1, t));
-                }
-                case 1u: {
-                    let oklab_color = mix(color0, color1, t);
-                    background_color = oklab_to_linear_srgb(oklab_color);
-                }
+            let unclamped_t =
+                (t - stop0_percentage) / (stop1_percentage - stop0_percentage);
+            if (unclamped_t > 0.0 && unclamped_t < 1.0) {
+                dither_strength = 1.0;
             }
+            t = clamp(unclamped_t, 0.0, 1.0);
 
-            // Dither to reduce banding in gradients (especially dark/alpha).
-            // Triangular-distributed noise breaks up 8-bit quantization steps.
-            // Ported from the HLSL and Metal backends, which already do this;
-            // the wgpu backend was the only one without it.
-            {
-                let seed = position * 0.6180339887;
-                let r1 = fract(sin(dot(seed, vec2<f32>(12.9898, 78.233))) * 43758.5453);
-                let r2 = fract(sin(dot(seed, vec2<f32>(39.3460, 11.135))) * 24634.6345);
-                let tri = r1 + r2 - 1.0;
-                background_color = vec4<f32>(
-                    background_color.rgb + tri * 2.0 / 255.0,
-                    background_color.a + tri * 3.0 / 255.0,
-                );
-            }
+            background_color = interpolate_gradient_color(
+                background.color_space, color0, color1, t);
         }
         case 4u: {
             // Radial gradient background.
@@ -509,32 +553,49 @@ fn gradient_color(background: Background, position: vec2<f32>, bounds: Bounds,
 
             let stop0_percentage = background.colors[0].percentage;
             let stop1_percentage = background.colors[1].percentage;
-            t = (t - stop0_percentage) / max(stop1_percentage - stop0_percentage, 1e-6);
-            t = clamp(t, 0.0, 1.0);
+            let unclamped_t =
+                (t - stop0_percentage) / max(stop1_percentage - stop0_percentage, 1e-6);
+            if (unclamped_t > 0.0 && unclamped_t < 1.0) {
+                dither_strength = 1.0;
+            }
+            t = clamp(unclamped_t, 0.0, 1.0);
 
-            switch (background.color_space) {
-                default: {
-                    background_color = srgba_to_linear(mix(color0, color1, t));
-                }
-                case 1u: {
-                    let oklab_color = mix(color0, color1, t);
-                    background_color = oklab_to_linear_srgb(oklab_color);
-                }
+            background_color = interpolate_gradient_color(
+                background.color_space, color0, color1, t);
+        }
+        case 5u: {
+            // Three-stop elliptical radial gradient. The final stop color and
+            // percentage reuse Background.solid and
+            // gradient_angle_or_pattern_height respectively.
+            let relative = (position - bounds.origin) / bounds.size;
+            let offset = relative - vec2<f32>(background.center_x, background.center_y);
+            let radii = max(vec2<f32>(background.radius_x, background.radius_y), vec2<f32>(1e-6));
+            let distance = length(offset / radii);
+            let first_percentage = background.colors[0].percentage;
+            let middle_percentage = background.colors[1].percentage;
+            let last_percentage = background.gradient_angle_or_pattern_height;
+            if (distance > first_percentage && distance < last_percentage) {
+                dither_strength = 1.0;
             }
 
-            // Dither to reduce banding in gradients (especially dark/alpha).
-            // Triangular-distributed noise breaks up 8-bit quantization steps.
-            // Ported from the HLSL and Metal backends, which already do this;
-            // the wgpu backend was the only one without it.
-            {
-                let seed = position * 0.6180339887;
-                let r1 = fract(sin(dot(seed, vec2<f32>(12.9898, 78.233))) * 43758.5453);
-                let r2 = fract(sin(dot(seed, vec2<f32>(39.3460, 11.135))) * 24634.6345);
-                let tri = r1 + r2 - 1.0;
-                background_color = vec4<f32>(
-                    background_color.rgb + tri * 2.0 / 255.0,
-                    background_color.a + tri * 3.0 / 255.0,
+            if (distance <= middle_percentage) {
+                let t = clamp(
+                    (distance - first_percentage) /
+                        max(middle_percentage - first_percentage, 1e-6),
+                    0.0,
+                    1.0,
                 );
+                background_color = interpolate_gradient_color(
+                    background.color_space, color0, color1, t);
+            } else {
+                let t = clamp(
+                    (distance - middle_percentage) /
+                        max(last_percentage - middle_percentage, 1e-6),
+                    0.0,
+                    1.0,
+                );
+                background_color = interpolate_gradient_color(
+                    background.color_space, color1, solid_color, t);
             }
         }
         case 2u: {
@@ -570,6 +631,9 @@ fn gradient_color(background: Background, position: vec2<f32>, bounds: Bounds,
         }
     }
 
+    if (background.tag == 1u || background.tag == 4u || background.tag == 5u) {
+        return dither_gradient(background_color, position, dither_strength);
+    }
     return background_color;
 }
 

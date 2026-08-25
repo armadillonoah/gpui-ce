@@ -43,6 +43,8 @@ struct GradientColor {
   float4 color1;
 };
 GradientColor prepare_fill_color(uint tag, uint color_space, Hsla solid, Hsla color0, Hsla color1);
+float4 interpolate_gradient_color(uint color_space, float4 from, float4 to, float t);
+float4 dither_gradient(float4 color, float2 position, float dither_strength);
 
 struct QuadVertexOutput {
   uint quad_id [[flat]];
@@ -1155,9 +1157,13 @@ GradientColor prepare_fill_color(uint tag, uint color_space, Hsla solid,
   GradientColor out;
   if (tag == 0 || tag == 2 || tag == 3) {
     out.solid = hsla_to_rgba(solid);
-  } else if (tag == 1 || tag == 4) {
+  } else if (tag == 1 || tag == 4 || tag == 5) {
     out.color0 = hsla_to_rgba(color0);
     out.color1 = hsla_to_rgba(color1);
+    if (tag == 5) {
+      // RadialGradient3 reuses Background.solid for its third color.
+      out.solid = hsla_to_rgba(solid);
+    }
 
     // Prepare color space in vertex for avoid conversion
     // in fragment shader for performance reasons
@@ -1165,10 +1171,49 @@ GradientColor prepare_fill_color(uint tag, uint color_space, Hsla solid,
       // Oklab
       out.color0 = srgb_to_oklab(out.color0);
       out.color1 = srgb_to_oklab(out.color1);
+      if (tag == 5) {
+        out.solid = srgb_to_oklab(out.solid);
+      }
     }
   }
 
   return out;
+}
+
+float4 interpolate_gradient_color(uint color_space, float4 start_color, float4 end_color, float t) {
+  float alpha = mix(start_color.a, end_color.a, t);
+  float3 premultiplied = mix(
+    start_color.rgb * start_color.a, end_color.rgb * end_color.a, t);
+  float4 interpolated = float4(0.0, 0.0, 0.0, alpha);
+  if (alpha > 0.0) {
+    interpolated.rgb = premultiplied / alpha;
+  }
+  if (color_space == 1) {
+    return oklab_to_srgb(interpolated);
+  }
+  return interpolated;
+}
+
+// Apply the same deterministic triangular dither to every gradient kind.
+// Alpha endpoints remain exact: dithering transparent alpha creates ghost
+// pixels, while dithering opaque alpha makes an otherwise opaque fill porous.
+float4 dither_gradient(float4 color, float2 position, float dither_strength) {
+  if (dither_strength <= 0.0) {
+    return color;
+  }
+  float2 seed = position * 0.6180339887;
+  float r1 = fract(sin(dot(seed, float2(12.9898, 78.233))) * 43758.5453);
+  float r2 = fract(sin(dot(seed, float2(39.3460, 11.135))) * 24634.6345);
+  float tri = r1 + r2 - 1.0;
+  float alpha_tri = r1 - r2;
+  color.rgb = clamp(color.rgb + tri * (1.0 / 255.0) * dither_strength, 0.0, 1.0);
+  if (color.a > 0.0 && color.a < 1.0) {
+    // This second TPDF combination is uncorrelated with the RGB noise, so
+    // source-alpha multiplication does not introduce a brightness bias.
+    color.a = clamp(
+      color.a + alpha_tri * (1.0 / 255.0) * dither_strength, 0.0, 1.0);
+  }
+  return color;
 }
 
 float2x2 rotate2d(float angle) {
@@ -1182,6 +1227,7 @@ float4 fill_color(Background background,
                       Bounds_ScaledPixels bounds,
                       float4 solid_color, float4 color0, float4 color1) {
   float4 color;
+  float dither_strength = 0.0;
 
   switch (background.tag) {
     case 0:
@@ -1213,34 +1259,15 @@ float4 fill_color(Background background,
       }
 
       // Adjust t based on the stop percentages
-      t = (t - background.colors[0].percentage)
+      float unclamped_t = (t - background.colors[0].percentage)
         / (background.colors[1].percentage
         - background.colors[0].percentage);
-      t = clamp(t, 0.0, 1.0);
-
-      switch (background.color_space) {
-        case 0:
-          color = mix(color0, color1, t);
-          break;
-        case 1: {
-          float4 oklab_color = mix(color0, color1, t);
-          color = oklab_to_srgb(oklab_color);
-          break;
-        }
+      if (unclamped_t > 0.0 && unclamped_t < 1.0) {
+        dither_strength = 1.0;
       }
+      t = clamp(unclamped_t, 0.0, 1.0);
 
-      // Dither to reduce banding in gradients (especially dark/alpha).
-      // Triangular-distributed noise breaks up 8-bit quantization steps.
-      // ±2/255 for RGB (enough for dark-on-dark compositing),
-      // ±3/255 for alpha (needs more because alpha × dark color = tiny steps).
-      {
-        float2 seed = position * 0.6180339887; // golden ratio spread
-        float r1 = fract(sin(dot(seed, float2(12.9898, 78.233))) * 43758.5453);
-        float r2 = fract(sin(dot(seed, float2(39.3460, 11.135))) * 24634.6345);
-        float tri = r1 + r2 - 1.0; // triangular PDF, range [-1, +1]
-        color.rgb += tri * 2.0 / 255.0;
-        color.a   += tri * 3.0 / 255.0;
-      }
+      color = interpolate_gradient_color(background.color_space, color0, color1, t);
 
       break;
     }
@@ -1253,29 +1280,45 @@ float4 fill_color(Background background,
         float2 radii = max(float2(background.radius_x, background.radius_y), 1e-6);
         float t = length(offset / radii);
 
-        t = (t - background.colors[0].percentage)
+        float unclamped_t = (t - background.colors[0].percentage)
             / max(background.colors[1].percentage - background.colors[0].percentage, 1e-6);
-        t = clamp(t, 0.0, 1.0);
+        if (unclamped_t > 0.0 && unclamped_t < 1.0) {
+            dither_strength = 1.0;
+        }
+        t = clamp(unclamped_t, 0.0, 1.0);
 
-        switch (background.color_space) {
-            case 0:
-                color = mix(color0, color1, t);
-                break;
-            case 1: {
-                float4 oklab_color = mix(color0, color1, t);
-                color = oklab_to_srgb(oklab_color);
-                break;
-            }
+        color = interpolate_gradient_color(background.color_space, color0, color1, t);
+
+        break;
+    }
+    case 5: {
+        // Three-stop elliptical radial gradient. The final stop color and
+        // percentage reuse Background.solid and
+        // gradient_angle_or_pattern_height respectively.
+        float2 rel = (position - float2(bounds.origin.x, bounds.origin.y))
+                   / float2(bounds.size.width, bounds.size.height);
+        float2 offset = rel - float2(background.center_x, background.center_y);
+        float2 radii = max(float2(background.radius_x, background.radius_y), 1e-6);
+        float distance = length(offset / radii);
+        float first_percentage = background.colors[0].percentage;
+        float middle_percentage = background.colors[1].percentage;
+        float last_percentage = background.gradient_angle_or_pattern_height;
+        if (distance > first_percentage && distance < last_percentage) {
+            dither_strength = 1.0;
         }
 
-        // Dither to reduce banding in gradients (especially dark/alpha).
-        {
-            float2 seed = position * 0.6180339887;
-            float r1 = fract(sin(dot(seed, float2(12.9898, 78.233))) * 43758.5453);
-            float r2 = fract(sin(dot(seed, float2(39.3460, 11.135))) * 24634.6345);
-            float tri = r1 + r2 - 1.0;
-            color.rgb += tri * 2.0 / 255.0;
-            color.a   += tri * 3.0 / 255.0;
+        if (distance <= middle_percentage) {
+            float t = clamp(
+                (distance - first_percentage)
+                    / max(middle_percentage - first_percentage, 1e-6),
+                0.0, 1.0);
+            color = interpolate_gradient_color(background.color_space, color0, color1, t);
+        } else {
+            float t = clamp(
+                (distance - middle_percentage)
+                    / max(last_percentage - middle_percentage, 1e-6),
+                0.0, 1.0);
+            color = interpolate_gradient_color(background.color_space, color1, solid_color, t);
         }
 
         break;
@@ -1311,6 +1354,9 @@ float4 fill_color(Background background,
     }
   }
 
+  if (background.tag == 1 || background.tag == 4 || background.tag == 5) {
+    return dither_gradient(color, position, dither_strength);
+  }
   return color;
 }
 
