@@ -529,6 +529,22 @@ mod tests {
     }
 
     #[test]
+    fn test_background_radial_gradient() {
+        let from = linear_color_stop(rgba(0xff0099ff), 0.0);
+        let to = linear_color_stop(rgba(0x00ff99ff), 1.0);
+        let background = radial_gradient((0.25, 0.75), (0.5, 0.8), from, to);
+
+        assert_eq!(background.tag, BackgroundTag::RadialGradient);
+        assert_eq!((background.center_x, background.center_y), (0.25, 0.75));
+        assert_eq!((background.radius_x, background.radius_y), (0.5, 0.8));
+        assert_eq!(background.colors, [from, to]);
+        assert_eq!(background.opacity(0.5).colors[0], from.opacity(0.5));
+        assert_eq!(background.opacity(0.5).colors[1], to.opacity(0.5));
+        assert!(!background.is_transparent());
+        assert!(background.opacity(0.0).is_transparent());
+    }
+
+    #[test]
     fn test_rgba_alpha() {
         use palette::WithAlpha;
         let color = Rgba::<palette::Srgb>::new(0.2, 0.6, 1.0, 0.8);
