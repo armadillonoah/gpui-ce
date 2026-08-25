@@ -438,12 +438,14 @@ impl WgpuRenderer {
         let device = Arc::clone(&context.device);
         let max_texture_size = device.limits().max_texture_dimension_2d;
 
-        let requested_width = config.size.width.0 as u32;
-        let requested_height = config.size.height.0 as u32;
-        let clamped_width = requested_width.min(max_texture_size);
-        let clamped_height = requested_height.min(max_texture_size);
+        let requested_width = config.size.width.0;
+        let requested_height = config.size.height.0;
+        let clamped_width = checked_surface_dimension(requested_width, max_texture_size);
+        let clamped_height = checked_surface_dimension(requested_height, max_texture_size);
 
-        if clamped_width != requested_width || clamped_height != requested_height {
+        if u32::try_from(requested_width).is_ok_and(|width| width > max_texture_size)
+            || u32::try_from(requested_height).is_ok_and(|height| height > max_texture_size)
+        {
             warn!(
                 "Requested surface size ({}, {}) exceeds maximum texture dimension {}. \
                  Clamping to ({}, {}). Window content may not fill the entire window.",
@@ -454,8 +456,8 @@ impl WgpuRenderer {
         let surface_config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: surface_format,
-            width: clamped_width.max(1),
-            height: clamped_height.max(1),
+            width: clamped_width,
+            height: clamped_height,
             present_mode: config
                 .preferred_present_mode
                 .filter(|mode| surface_caps.present_modes.contains(mode))
@@ -1187,23 +1189,25 @@ impl WgpuRenderer {
     }
 
     pub fn update_drawable_size(&mut self, size: Size<DevicePixels>) {
-        let width = size.width.0 as u32;
-        let height = size.height.0 as u32;
+        let requested_width = size.width.0;
+        let requested_height = size.height.0;
+        let width = checked_surface_dimension(requested_width, self.max_texture_size);
+        let height = checked_surface_dimension(requested_height, self.max_texture_size);
 
         if width != self.surface_config.width || height != self.surface_config.height {
-            let clamped_width = width.min(self.max_texture_size);
-            let clamped_height = height.min(self.max_texture_size);
-
-            if clamped_width != width || clamped_height != height {
+            if u32::try_from(requested_width).is_ok_and(|width| width > self.max_texture_size)
+                || u32::try_from(requested_height)
+                    .is_ok_and(|height| height > self.max_texture_size)
+            {
                 warn!(
                     "Requested surface size ({}, {}) exceeds maximum texture dimension {}. \
                      Clamping to ({}, {}). Window content may not fill the entire window.",
-                    width, height, self.max_texture_size, clamped_width, clamped_height
+                    requested_width, requested_height, self.max_texture_size, width, height
                 );
             }
 
-            self.surface_config.width = clamped_width.max(1);
-            self.surface_config.height = clamped_height.max(1);
+            self.surface_config.width = width;
+            self.surface_config.height = height;
             let surface_config = self.surface_config.clone();
 
             // GPU resources may not exist yet, skip rather than panicking
@@ -1211,15 +1215,10 @@ impl WgpuRenderer {
                 return;
             };
 
-            // Wait for any in-flight GPU work to complete before destroying textures
-            if let Err(e) = resources.device.poll(wgpu::PollType::Wait {
-                submission_index: None,
-                timeout: None,
-            }) {
-                warn!("Failed to poll device during resize: {e:?}");
-            }
-
-            // Destroy old textures before allocating new ones to avoid GPU memory spikes
+            // WGPU defers native texture destruction until each texture's last
+            // submission completes. Surface::configure performs its own required
+            // wait-for-idle, so an additional blocking device poll here would only
+            // stall the UI thread during interactive resizing.
             if let Some(ref texture) = resources.path_intermediate_texture {
                 texture.destroy();
             }
@@ -2766,9 +2765,27 @@ fn uniform_slot_offset(slot: u64, stride: u64, capacity: u64) -> Option<u64> {
         .flatten()
 }
 
+fn checked_surface_dimension(requested: i32, maximum: u32) -> u32 {
+    u32::try_from(requested)
+        .ok()
+        .filter(|&dimension| dimension > 0)
+        .map(|dimension| dimension.min(maximum.max(1)))
+        .unwrap_or(1)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{next_uniform_slot_capacity, uniform_slot_offset};
+    use super::{checked_surface_dimension, next_uniform_slot_capacity, uniform_slot_offset};
+
+    #[test]
+    fn surface_dimensions_handle_sentinels_and_adapter_limits() {
+        const MAXIMUM: u32 = 16_384;
+
+        assert_eq!(checked_surface_dimension(i32::MIN, MAXIMUM), 1);
+        assert_eq!(checked_surface_dimension(0, MAXIMUM), 1);
+        assert_eq!(checked_surface_dimension(1_280, MAXIMUM), 1_280);
+        assert_eq!(checked_surface_dimension(i32::MAX, MAXIMUM), MAXIMUM);
+    }
 
     #[test]
     fn surface_param_slots_have_distinct_aligned_offsets() {
