@@ -158,6 +158,68 @@ struct WgpuBindGroupLayouts {
 /// Shared GPU context reference, used to coordinate device recovery across multiple windows.
 pub type GpuContext = Rc<RefCell<Option<WgpuContext>>>;
 
+/// Result of a non-blocking GPU device recovery attempt.
+///
+/// Native platforms should arrange one delayed frame when recovery is pending.
+/// Calling [`WgpuRenderer::recover`] again before `retry_after` expires is safe,
+/// but will not attempt to recreate the device.
+#[cfg(not(target_family = "wasm"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DeviceRecoveryStatus {
+    Recovered,
+    Pending { retry_after: std::time::Duration },
+}
+
+#[cfg(not(target_family = "wasm"))]
+const DEVICE_RECOVERY_STABILIZATION_DELAY: std::time::Duration =
+    std::time::Duration::from_millis(350);
+
+#[cfg(not(target_family = "wasm"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DeviceRecoveryDelayReason {
+    DeviceStabilization,
+    RetryFailure,
+}
+
+#[cfg(not(target_family = "wasm"))]
+#[derive(Default)]
+struct DeviceRecoveryState {
+    retry_not_before: Option<std::time::Instant>,
+    delay_reason: Option<DeviceRecoveryDelayReason>,
+}
+
+#[cfg(not(target_family = "wasm"))]
+impl DeviceRecoveryState {
+    fn stabilize(&mut self, now: std::time::Instant) {
+        self.retry_not_before = Some(now + DEVICE_RECOVERY_STABILIZATION_DELAY);
+        self.delay_reason = Some(DeviceRecoveryDelayReason::DeviceStabilization);
+    }
+
+    fn stabilize_if_idle(&mut self, now: std::time::Instant) {
+        if self.retry_not_before.is_none() {
+            self.stabilize(now);
+        }
+    }
+
+    fn defer_after_failure(&mut self, now: std::time::Instant) {
+        self.retry_not_before = Some(now + DEVICE_RECOVERY_STABILIZATION_DELAY);
+        self.delay_reason = Some(DeviceRecoveryDelayReason::RetryFailure);
+    }
+
+    fn bypass_stabilization_for_shared_context(&mut self) {
+        if self.delay_reason == Some(DeviceRecoveryDelayReason::DeviceStabilization) {
+            self.retry_not_before = None;
+            self.delay_reason = None;
+        }
+    }
+
+    fn retry_after(&self, now: std::time::Instant) -> Option<std::time::Duration> {
+        self.retry_not_before
+            .and_then(|deadline| deadline.checked_duration_since(now))
+            .filter(|duration| !duration.is_zero())
+    }
+}
+
 /// GPU resources that must be dropped together during device recovery.
 struct WgpuResources {
     device: Arc<wgpu::Device>,
@@ -271,6 +333,8 @@ pub struct WgpuRenderer {
     device_lost: std::sync::Arc<std::sync::atomic::AtomicBool>,
     surface_configured: bool,
     needs_redraw: bool,
+    #[cfg(not(target_family = "wasm"))]
+    recovery_state: DeviceRecoveryState,
 }
 
 impl WgpuRenderer {
@@ -655,6 +719,8 @@ impl WgpuRenderer {
             device_lost: context.device_lost_flag(),
             surface_configured: true,
             needs_redraw: false,
+            #[cfg(not(target_family = "wasm"))]
+            recovery_state: DeviceRecoveryState::default(),
         })
     }
 
@@ -2606,50 +2672,94 @@ impl WgpuRenderer {
     /// - The first window to call this will recreate the shared context
     /// - Subsequent windows will adopt the already-recovered context
     #[cfg(not(target_family = "wasm"))]
-    pub fn recover<W>(&mut self, window: &W) -> anyhow::Result<()>
+    pub fn recover<W>(&mut self, window: &W) -> anyhow::Result<DeviceRecoveryStatus>
     where
         W: HasWindowHandle + HasDisplayHandle + std::fmt::Debug + Send + Sync + Clone + 'static,
     {
         let gpu_context = self.context.as_ref().expect("recover requires gpu_context");
 
-        // Check if another window already recovered the context
-        let needs_new_context = gpu_context
-            .borrow()
-            .as_ref()
-            .is_none_or(|ctx| ctx.device_lost());
-
-        let window_handle = window
-            .window_handle()
-            .map_err(|e| anyhow::anyhow!("Failed to get window handle: {e}"))?;
-
-        let surface = if needs_new_context {
-            log::warn!("GPU device lost, recreating context...");
-
-            // Drop old resources to release Arc<Device>/Arc<Queue> and GPU resources
-            self.resources = None;
-            *gpu_context.borrow_mut() = None;
-
-            // Wait briefly for the GPU driver to stabilize, then try to
-            // recreate the context without software renderers. If this fails
-            // the caller should request another frame and retry — the real GPU
-            // may need more time to come back (e.g. after suspend/resume).
-            std::thread::sleep(std::time::Duration::from_millis(350));
-
-            let instance = WgpuContext::instance(Box::new(window.clone()));
-            let surface = create_surface(&instance, window_handle.as_raw())?;
-            let new_context = WgpuContext::new_rejecting_software(
-                instance,
-                &surface,
-                self.compositor_gpu,
-                self.extra_requirements.as_ref(),
-            )?;
-            *gpu_context.borrow_mut() = Some(new_context);
-            surface
-        } else {
-            let ctx_ref = gpu_context.borrow();
-            let instance = &ctx_ref.as_ref().unwrap().instance;
-            create_surface(instance, window_handle.as_raw())?
+        let now = std::time::Instant::now();
+        let shared_context_state = {
+            let context = gpu_context.borrow();
+            match context.as_ref() {
+                Some(context) if !context.device_lost() => SharedContextState::Healthy,
+                Some(_) => SharedContextState::Lost,
+                None => SharedContextState::Missing,
+            }
         };
+
+        match shared_context_state {
+            SharedContextState::Lost => {
+                // This is the first observer of the newly-lost shared context.
+                // Start a fresh stabilization period even if an earlier surface
+                // retry happened to be pending.
+                self.resources = None;
+                *gpu_context.borrow_mut() = None;
+                self.recovery_state.stabilize(now);
+            }
+            SharedContextState::Missing => {
+                // Another window may already have cleared the shared context.
+                // Drop this window's old device resources and start its local
+                // deadline only once.
+                self.resources = None;
+                self.recovery_state.stabilize_if_idle(now);
+            }
+            SharedContextState::Healthy => {
+                // Another window completed shared-context recovery. Adopt it
+                // immediately instead of waiting out this window's original
+                // device-stabilization deadline. A delay caused by this
+                // window's own failed surface recreation is still respected.
+                self.recovery_state
+                    .bypass_stabilization_for_shared_context();
+            }
+        }
+
+        if let Some(retry_after) = self.recovery_state.retry_after(now) {
+            return Ok(DeviceRecoveryStatus::Pending { retry_after });
+        }
+
+        let needs_new_context = shared_context_state != SharedContextState::Healthy;
+        if needs_new_context {
+            log::warn!("GPU device lost, recreating context...");
+        }
+
+        let recovery_attempt = (|| {
+            let window_handle = window
+                .window_handle()
+                .map_err(|e| anyhow::anyhow!("Failed to get window handle: {e}"))?;
+
+            if needs_new_context {
+                let instance = WgpuContext::instance(Box::new(window.clone()));
+                let surface = create_surface(&instance, window_handle.as_raw())?;
+                let new_context = WgpuContext::new_rejecting_software(
+                    instance,
+                    &surface,
+                    self.compositor_gpu,
+                    self.extra_requirements.as_ref(),
+                )?;
+                Ok((surface, Some(new_context)))
+            } else {
+                let instance = gpu_context
+                    .borrow()
+                    .as_ref()
+                    .expect("healthy shared context should exist")
+                    .instance
+                    .clone();
+                Ok((create_surface(&instance, window_handle.as_raw())?, None))
+            }
+        })();
+
+        let (surface, new_context) = match recovery_attempt {
+            Ok(recovery) => recovery,
+            Err(error) => {
+                self.recovery_state
+                    .defer_after_failure(std::time::Instant::now());
+                return Err(error);
+            }
+        };
+        if let Some(new_context) = new_context {
+            *gpu_context.borrow_mut() = Some(new_context);
+        }
 
         let config = WgpuSurfaceConfig {
             size: gpui::Size {
@@ -2667,7 +2777,7 @@ impl WgpuRenderer {
         self.atlas.handle_device_lost(context);
 
         let extra_reqs = self.extra_requirements.clone();
-        *self = Self::new_internal(
+        let recovered_renderer = Self::new_internal(
             Some(gpu_context.clone()),
             context,
             surface,
@@ -2675,11 +2785,38 @@ impl WgpuRenderer {
             self.compositor_gpu,
             extra_reqs,
             self.atlas.clone(),
-        )?;
+        );
+        drop(ctx_ref);
+        *self = match recovered_renderer {
+            Ok(renderer) => renderer,
+            Err(error) => {
+                self.recovery_state
+                    .defer_after_failure(std::time::Instant::now());
+                return Err(error);
+            }
+        };
 
         log::info!("GPU recovery complete");
-        Ok(())
+        Ok(DeviceRecoveryStatus::Recovered)
     }
+
+    /// Returns the remaining delay before a failed recovery should be retried.
+    ///
+    /// This is intended for callers handling an `Err` from [`Self::recover`].
+    #[cfg(not(target_family = "wasm"))]
+    pub fn recovery_retry_after(&self) -> std::time::Duration {
+        self.recovery_state
+            .retry_after(std::time::Instant::now())
+            .unwrap_or(DEVICE_RECOVERY_STABILIZATION_DELAY)
+    }
+}
+
+#[cfg(not(target_family = "wasm"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SharedContextState {
+    Healthy,
+    Lost,
+    Missing,
 }
 
 #[cfg(not(target_family = "wasm"))]
@@ -2775,6 +2912,10 @@ fn checked_surface_dimension(requested: i32, maximum: u32) -> u32 {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(not(target_family = "wasm"))]
+    use super::{
+        DEVICE_RECOVERY_STABILIZATION_DELAY, DeviceRecoveryDelayReason, DeviceRecoveryState,
+    };
     use super::{checked_surface_dimension, next_uniform_slot_capacity, uniform_slot_offset};
 
     #[test]
@@ -2806,5 +2947,49 @@ mod tests {
         assert_eq!(next_uniform_slot_capacity(64, 65, 1024), Some(128));
         assert_eq!(next_uniform_slot_capacity(64, 900, 1000), Some(1000));
         assert_eq!(next_uniform_slot_capacity(64, 1001, 1000), None);
+    }
+
+    #[test]
+    #[cfg(not(target_family = "wasm"))]
+    fn device_recovery_deadline_preserves_stabilization_without_blocking() {
+        let started = std::time::Instant::now();
+        let mut state = DeviceRecoveryState::default();
+
+        state.stabilize_if_idle(started);
+        assert_eq!(
+            state.retry_after(started),
+            Some(DEVICE_RECOVERY_STABILIZATION_DELAY)
+        );
+        state.stabilize_if_idle(started + std::time::Duration::from_millis(125));
+        assert_eq!(
+            state.retry_after(started + std::time::Duration::from_millis(125)),
+            Some(std::time::Duration::from_millis(225))
+        );
+        assert_eq!(
+            state.retry_after(started + DEVICE_RECOVERY_STABILIZATION_DELAY),
+            None
+        );
+    }
+
+    #[test]
+    #[cfg(not(target_family = "wasm"))]
+    fn recovered_shared_context_bypasses_only_stabilization_delay() {
+        let started = std::time::Instant::now();
+        let mut state = DeviceRecoveryState::default();
+
+        state.stabilize(started);
+        state.bypass_stabilization_for_shared_context();
+        assert_eq!(state.retry_after(started), None);
+
+        state.defer_after_failure(started);
+        state.bypass_stabilization_for_shared_context();
+        assert_eq!(
+            state.delay_reason,
+            Some(DeviceRecoveryDelayReason::RetryFailure)
+        );
+        assert_eq!(
+            state.retry_after(started),
+            Some(DEVICE_RECOVERY_STABILIZATION_DELAY)
+        );
     }
 }

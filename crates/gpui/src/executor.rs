@@ -318,6 +318,18 @@ impl ForegroundExecutor {
         self.inner.spawn(future.boxed_local())
     }
 
+    /// Returns a foreground task that becomes runnable after `duration`.
+    ///
+    /// The wait is registered with the platform scheduler, so it does not
+    /// block the main thread or require a polling loop.
+    #[track_caller]
+    pub fn timer(&self, duration: Duration) -> Task<()> {
+        if duration.is_zero() {
+            return Task::ready(());
+        }
+        self.spawn(self.inner.timer(duration))
+    }
+
     /// Enqueues the given Task to run on the main thread with the given priority.
     #[track_caller]
     pub fn spawn_with_priority<R>(
@@ -528,5 +540,35 @@ mod test {
             *task_ran.borrow(),
             "Task should run normally when app is alive"
         );
+    }
+
+    #[test]
+    fn foreground_timer_waits_without_polling() {
+        let (dispatcher, _background_executor, app) = create_test_app();
+        let foreground_executor = app.borrow().foreground_executor.clone();
+        let timer_fired = Rc::new(RefCell::new(false));
+        let delay = Duration::from_millis(350);
+        let timer = foreground_executor.timer(delay);
+
+        foreground_executor
+            .spawn({
+                let timer_fired = Rc::clone(&timer_fired);
+                async move {
+                    timer.await;
+                    *timer_fired.borrow_mut() = true;
+                }
+            })
+            .detach();
+
+        dispatcher.run_until_parked();
+        assert!(!*timer_fired.borrow());
+
+        dispatcher.advance_clock(delay - Duration::from_millis(1));
+        dispatcher.run_until_parked();
+        assert!(!*timer_fired.borrow());
+
+        dispatcher.advance_clock(Duration::from_millis(1));
+        dispatcher.run_until_parked();
+        assert!(*timer_fired.borrow());
     }
 }

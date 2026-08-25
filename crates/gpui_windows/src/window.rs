@@ -33,7 +33,7 @@ use crate::*;
 use gpui::*;
 
 #[cfg(feature = "wgpu")]
-use gpui_wgpu::{WgpuRenderer, WgpuSurfaceConfig, wgpu};
+use gpui_wgpu::{DeviceRecoveryStatus, WgpuRenderer, WgpuSurfaceConfig, wgpu};
 
 pub(crate) struct WindowsWindow(pub Rc<WindowsWindowInner>);
 
@@ -77,6 +77,10 @@ pub struct WindowsWindowState {
     /// and when a forced render was requested while another draw was in
     /// progress and had to be deferred.
     pub force_render_pending: Cell<bool>,
+    /// Deduplicates the foreground timer used to retry non-blocking wgpu
+    /// device recovery after its driver-stabilization deadline.
+    #[cfg(feature = "wgpu")]
+    pub gpu_recovery_retry_scheduled: Cell<bool>,
 
     pub click_state: ClickState,
     pub current_cursor: Cell<Option<HCURSOR>>,
@@ -195,6 +199,8 @@ impl WindowsWindowState {
             hovered: Cell::new(hovered),
             renderer: RefCell::new(renderer),
             force_render_pending: Cell::new(false),
+            #[cfg(feature = "wgpu")]
+            gpu_recovery_retry_scheduled: Cell::new(false),
             click_state,
             current_cursor: Cell::new(current_cursor),
             cursor_visible,
@@ -308,6 +314,43 @@ impl WindowsWindowInner {
             system_settings: WindowsSystemSettings::new(),
             parent_hwnd: context.parent_hwnd,
         }))
+    }
+
+    #[cfg(feature = "wgpu")]
+    pub(crate) fn schedule_gpu_recovery_retry(self: &Rc<Self>, delay: Duration) {
+        if self.state.gpu_recovery_retry_scheduled.replace(true) {
+            return;
+        }
+
+        let this = Rc::downgrade(self);
+        let executor = self.executor.clone();
+        let timer = executor.timer(delay);
+        executor
+            .spawn(async move {
+                timer.await;
+                let Some(this) = this.upgrade() else {
+                    return;
+                };
+                this.state.gpu_recovery_retry_scheduled.set(false);
+
+                // A different window may have recovered the shared context and
+                // this window may already have adopted it before this timer ran.
+                if !this.state.renderer.borrow().device_lost() {
+                    return;
+                }
+
+                this.state.force_render_pending.set(true);
+                unsafe {
+                    PostMessageW(
+                        Some(this.platform_window_handle),
+                        WM_GPUI_FORCE_UPDATE_WINDOW,
+                        WPARAM(this.validation_number),
+                        LPARAM(0),
+                    )
+                    .log_err();
+                }
+            })
+            .detach();
     }
 
     fn toggle_fullscreen(self: &Rc<Self>) {
@@ -1127,16 +1170,24 @@ impl PlatformWindow for WindowsWindow {
         {
             let mut renderer = self.state.renderer.borrow_mut();
             if renderer.device_lost() {
-                match renderer.recover(&RawWindow {
+                let retry_after = match renderer.recover(&RawWindow {
                     hwnd: self.platform_window_handle,
                 }) {
-                    Ok(()) => {}
-                    Err(err) => {
-                        log::warn!("GPU recovery failed, will retry on next frame: {err}");
+                    Ok(DeviceRecoveryStatus::Recovered) => {
+                        self.state.force_render_pending.set(true);
+                        None
                     }
-                }
+                    Ok(DeviceRecoveryStatus::Pending { retry_after }) => Some(retry_after),
+                    Err(err) => {
+                        log::warn!("GPU recovery failed, will retry after stabilization: {err}");
+                        Some(renderer.recovery_retry_after())
+                    }
+                };
 
-                self.state.force_render_pending.set(true);
+                drop(renderer);
+                if let Some(retry_after) = retry_after {
+                    self.0.schedule_gpu_recovery_retry(retry_after);
+                }
                 return;
             }
             if !renderer.draw(scene) {

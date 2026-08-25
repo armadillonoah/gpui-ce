@@ -41,7 +41,7 @@ use gpui::{
     popup::PopupOptions,
     px, size,
 };
-use gpui_wgpu::{CompositorGpuHint, WgpuRenderer, WgpuSurfaceConfig, wgpu};
+use gpui_wgpu::{CompositorGpuHint, DeviceRecoveryStatus, WgpuRenderer, WgpuSurfaceConfig, wgpu};
 
 #[derive(Default)]
 pub(crate) struct Callbacks {
@@ -94,6 +94,7 @@ struct InProgressConfigure {
 }
 
 pub struct WaylandWindowState {
+    destroyed: bool,
     surface_state: WaylandSurfaceState,
     acknowledged_first_configure: bool,
     parent: Option<WaylandWindowStatePtr>,
@@ -123,6 +124,7 @@ pub struct WaylandWindowState {
     active: bool,
     hovered: bool,
     pub(crate) force_render_after_recovery: bool,
+    gpu_recovery_retry_scheduled: bool,
     renderer_presented: bool,
     in_progress_configure: Option<InProgressConfigure>,
     resize_throttle: bool,
@@ -599,6 +601,7 @@ impl WaylandWindowState {
         }
 
         Ok(Self {
+            destroyed: false,
             surface_state,
             acknowledged_first_configure: false,
             parent,
@@ -628,6 +631,7 @@ impl WaylandWindowState {
             active: false,
             hovered: false,
             force_render_after_recovery: false,
+            gpu_recovery_retry_scheduled: false,
             renderer_presented: false,
             in_progress_window_controls: None,
             window_controls: WindowControls::default(),
@@ -687,6 +691,7 @@ pub enum ImeInput {
 impl Drop for WaylandWindow {
     fn drop(&mut self) {
         let mut state = self.0.state.borrow_mut();
+        state.destroyed = true;
         let surface_id = state.surface.id();
         if let Some(parent) = state.parent.as_ref() {
             parent.state.borrow_mut().children.remove(&surface_id);
@@ -863,6 +868,43 @@ impl WaylandWindowStatePtr {
             });
             self.update_ime_enabled();
         }
+    }
+
+    fn schedule_gpu_recovery_retry(&self, delay: std::time::Duration) {
+        let executor = {
+            let mut state = self.state.borrow_mut();
+            if state.destroyed || state.gpu_recovery_retry_scheduled {
+                return;
+            }
+            state.gpu_recovery_retry_scheduled = true;
+            state.globals.executor.clone()
+        };
+
+        let state = Rc::downgrade(&self.state);
+        let callbacks = Rc::downgrade(&self.callbacks);
+        let timer = executor.timer(delay);
+        executor
+            .spawn(async move {
+                timer.await;
+                let (Some(state), Some(callbacks)) = (state.upgrade(), callbacks.upgrade()) else {
+                    return;
+                };
+
+                {
+                    let mut state = state.borrow_mut();
+                    if state.destroyed {
+                        return;
+                    }
+                    state.gpu_recovery_retry_scheduled = false;
+                    if !state.renderer.device_lost() {
+                        return;
+                    }
+                    state.force_render_after_recovery = true;
+                }
+
+                WaylandWindowStatePtr { state, callbacks }.frame();
+            })
+            .detach();
     }
 
     fn update_ime_enabled(&self) {
@@ -1727,14 +1769,22 @@ impl PlatformWindow for WaylandWindow {
                     .display_ptr()
                     .cast::<std::ffi::c_void>(),
             };
-            match state.renderer.recover(&raw_window) {
-                Ok(()) => {}
-                Err(err) => {
-                    log::warn!("GPU recovery failed, will retry on next frame: {err}");
+            let retry_after = match state.renderer.recover(&raw_window) {
+                Ok(DeviceRecoveryStatus::Recovered) => {
+                    state.force_render_after_recovery = true;
+                    None
                 }
-            }
+                Ok(DeviceRecoveryStatus::Pending { retry_after }) => Some(retry_after),
+                Err(err) => {
+                    log::warn!("GPU recovery failed, will retry after stabilization: {err}");
+                    Some(state.renderer.recovery_retry_after())
+                }
+            };
 
-            state.force_render_after_recovery = true;
+            drop(state);
+            if let Some(retry_after) = retry_after {
+                self.0.schedule_gpu_recovery_retry(retry_after);
+            }
             return;
         }
 

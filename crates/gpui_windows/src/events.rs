@@ -1,5 +1,7 @@
 #[cfg(feature = "wgpu")]
 use crate::window::RawWindow;
+#[cfg(feature = "wgpu")]
+use gpui_wgpu::DeviceRecoveryStatus;
 use std::{cell::Cell, rc::Rc, sync::atomic::Ordering};
 
 use anyhow::Context as _;
@@ -1272,7 +1274,7 @@ impl WindowsWindowInner {
         None
     }
 
-    fn handle_device_lost(&self, lparam: LPARAM) -> Option<isize> {
+    fn handle_device_lost(self: &Rc<Self>, lparam: LPARAM) -> Option<isize> {
         #[cfg(not(feature = "wgpu"))]
         {
             let devices = lparam.0 as *const DirectXDevices;
@@ -1289,10 +1291,22 @@ impl WindowsWindowInner {
         #[cfg(feature = "wgpu")]
         {
             _ = lparam;
-            if let Err(err) = self.state.renderer.borrow_mut().recover(&RawWindow {
-                hwnd: self.platform_window_handle,
-            }) {
-                panic!("Device lost: {err}");
+            let retry_after = {
+                let mut renderer = self.state.renderer.borrow_mut();
+                match renderer.recover(&RawWindow {
+                    hwnd: self.platform_window_handle,
+                }) {
+                    Ok(DeviceRecoveryStatus::Recovered) => None,
+                    Ok(DeviceRecoveryStatus::Pending { retry_after }) => Some(retry_after),
+                    Err(err) => {
+                        log::warn!("GPU recovery failed, will retry after stabilization: {err}");
+                        Some(renderer.recovery_retry_after())
+                    }
+                }
+            };
+            if let Some(retry_after) = retry_after {
+                self.schedule_gpu_recovery_retry(retry_after);
+                return Some(0);
             }
         }
         // Make sure the first `draw_window` after recovery (whether it comes

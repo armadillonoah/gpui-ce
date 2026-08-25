@@ -9,7 +9,7 @@ use gpui::{
     Tiling, WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControlArea,
     WindowDecorations, WindowKind, WindowParams, popup::PopupNotSupportedError, px,
 };
-use gpui_wgpu::{CompositorGpuHint, WgpuRenderer, WgpuSurfaceConfig};
+use gpui_wgpu::{CompositorGpuHint, DeviceRecoveryStatus, WgpuRenderer, WgpuSurfaceConfig};
 
 use collections::FxHashSet;
 use gpui_util::{ResultExt, maybe};
@@ -279,6 +279,7 @@ pub struct X11WindowState {
     active: bool,
     hovered: bool,
     pub(crate) force_render_after_recovery: bool,
+    gpu_recovery_retry_scheduled: bool,
     fullscreen: bool,
     client_side_decorations_supported: bool,
     decorations: WindowDecorations,
@@ -803,6 +804,7 @@ impl X11WindowState {
                 active: false,
                 hovered: false,
                 force_render_after_recovery: false,
+                gpu_recovery_retry_scheduled: false,
                 fullscreen: false,
                 maximized_vertical: false,
                 maximized_horizontal: false,
@@ -1149,6 +1151,51 @@ impl X11WindowStatePtr {
             fun(request_frame_options);
             self.callbacks.borrow_mut().request_frame = Some(fun);
         }
+    }
+
+    fn schedule_gpu_recovery_retry(&self, delay: std::time::Duration) {
+        let executor = {
+            let mut state = self.state.borrow_mut();
+            if state.destroyed || state.gpu_recovery_retry_scheduled {
+                return;
+            }
+            state.gpu_recovery_retry_scheduled = true;
+            state.executor.clone()
+        };
+
+        let state = Rc::downgrade(&self.state);
+        let callbacks = Rc::downgrade(&self.callbacks);
+        let timer = executor.timer(delay);
+        executor
+            .spawn(async move {
+                timer.await;
+                let (Some(state), Some(callbacks)) = (state.upgrade(), callbacks.upgrade()) else {
+                    return;
+                };
+
+                {
+                    let mut state = state.borrow_mut();
+                    if state.destroyed {
+                        return;
+                    }
+                    state.gpu_recovery_retry_scheduled = false;
+                    if !state.renderer.device_lost() {
+                        return;
+                    }
+                }
+
+                let callback = callbacks.borrow_mut().request_frame.take();
+                if let Some(mut callback) = callback {
+                    callback(RequestFrameOptions {
+                        force_render: true,
+                        ..Default::default()
+                    });
+                    callbacks.borrow_mut().request_frame = Some(callback);
+                } else {
+                    state.borrow_mut().force_render_after_recovery = true;
+                }
+            })
+            .detach();
     }
 
     pub fn handle_input(&self, input: PlatformInput) {
@@ -1721,14 +1768,22 @@ impl PlatformWindow for X11Window {
                 window_id: self.0.x_window,
                 visual_id: inner.visual_id,
             };
-            match inner.renderer.recover(&raw_window) {
-                Ok(()) => {}
-                Err(err) => {
-                    log::warn!("GPU recovery failed, will retry on next frame: {err}");
+            let retry_after = match inner.renderer.recover(&raw_window) {
+                Ok(DeviceRecoveryStatus::Recovered) => {
+                    inner.force_render_after_recovery = true;
+                    None
                 }
-            }
+                Ok(DeviceRecoveryStatus::Pending { retry_after }) => Some(retry_after),
+                Err(err) => {
+                    log::warn!("GPU recovery failed, will retry after stabilization: {err}");
+                    Some(inner.renderer.recovery_retry_after())
+                }
+            };
 
-            inner.force_render_after_recovery = true;
+            drop(inner);
+            if let Some(retry_after) = retry_after {
+                self.0.schedule_gpu_recovery_retry(retry_after);
+            }
             return;
         }
 
