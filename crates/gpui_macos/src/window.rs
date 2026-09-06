@@ -4,7 +4,8 @@ use crate::{
     kTISPropertyInputSourceIsASCIICapable, kTISPropertyInputSourceType, kTISTypeKeyboardInputMode,
     ns_string, renderer,
 };
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(feature = "wgpu")]
+use anyhow::Context as _;
 use anyhow::Result;
 use block::ConcreteBlock;
 use cocoa::{
@@ -32,7 +33,7 @@ use gpui::{
     WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowKind,
     WindowParams, point, px, size,
 };
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(all(any(test, feature = "test-support"), not(feature = "wgpu")))]
 use image::RgbaImage;
 
 use core_foundation::base::{CFRelease, CFTypeRef};
@@ -75,6 +76,45 @@ use std::{
 };
 
 const WINDOW_STATE_IVAR: &str = "windowState";
+
+/// Raw AppKit handles used while the WGPU renderer is created, before the
+/// `MacWindowState` that normally supplies them has been assembled.
+#[cfg(feature = "wgpu")]
+#[derive(Clone, Copy, Debug)]
+struct RawMacWindow {
+    native_view: usize,
+}
+
+#[cfg(feature = "wgpu")]
+impl RawMacWindow {
+    fn new(native_view: id) -> Self {
+        debug_assert!(!native_view.is_null());
+        Self {
+            native_view: native_view as usize,
+        }
+    }
+}
+
+#[cfg(feature = "wgpu")]
+impl rwh::HasWindowHandle for RawMacWindow {
+    fn window_handle(&self) -> Result<rwh::WindowHandle<'_>, rwh::HandleError> {
+        let native_view =
+            NonNull::new(self.native_view as *mut c_void).ok_or(rwh::HandleError::Unavailable)?;
+        // SAFETY: MacWindow owns the NSView for at least as long as the renderer and surface.
+        unsafe {
+            Ok(rwh::WindowHandle::borrow_raw(rwh::RawWindowHandle::AppKit(
+                rwh::AppKitWindowHandle::new(native_view),
+            )))
+        }
+    }
+}
+
+#[cfg(feature = "wgpu")]
+impl rwh::HasDisplayHandle for RawMacWindow {
+    fn display_handle(&self) -> Result<rwh::DisplayHandle<'_>, rwh::HandleError> {
+        Ok(rwh::DisplayHandle::appkit())
+    }
+}
 
 static mut WINDOW_CLASS: *const Class = ptr::null();
 static mut PANEL_CLASS: *const Class = ptr::null();
@@ -509,6 +549,10 @@ struct MacWindowState {
     cursor_visible: Arc<AtomicBool>,
     frame_source: Option<WindowFrameSource>,
     renderer: renderer::Renderer,
+    /// Forces an uncached scene after GPU recovery or a transient presentation failure.
+    force_render_pending: bool,
+    #[cfg(feature = "wgpu")]
+    gpu_recovery_retry_scheduled: bool,
     request_frame_callback: Option<Box<dyn FnMut(RequestFrameOptions)>>,
     event_callback: Option<Box<dyn FnMut(PlatformInput) -> gpui::DispatchEventResult>>,
     activate_callback: Option<Box<dyn FnMut(bool)>>,
@@ -549,6 +593,13 @@ struct MacWindowState {
 }
 
 impl MacWindowState {
+    fn next_frame_request(&mut self) -> RequestFrameOptions {
+        RequestFrameOptions {
+            force_render: mem::take(&mut self.force_render_pending),
+            ..Default::default()
+        }
+    }
+
     fn move_traffic_light(&mut self) {
         if let Some(traffic_light_position) = self.traffic_light_position {
             if self.is_fullscreen() {
@@ -784,7 +835,8 @@ impl MacWindow {
         foreground_executor: ForegroundExecutor,
         background_executor: BackgroundExecutor,
         renderer_context: renderer::Context,
-    ) -> Self {
+        #[cfg(feature = "wgpu")] gpu_requirements: Option<gpui_wgpu::WgpuDeviceRequirements>,
+    ) -> Result<Self> {
         unsafe {
             let pool = NSAutoreleasePool::new(nil);
 
@@ -893,6 +945,43 @@ impl MacWindow {
             let native_view = NSView::initWithFrame_(native_view, NSView::bounds(content_view));
             assert!(!native_view.is_null());
 
+            #[cfg(feature = "wgpu")]
+            let renderer = {
+                let raw_window = RawMacWindow::new(native_view);
+                let result = renderer::Renderer::new(
+                    renderer_context,
+                    &raw_window,
+                    gpui_wgpu::WgpuSurfaceConfig {
+                        size: bounds
+                            .size
+                            .to_device_pixels(get_scale_factor(native_window)),
+                        transparent: false,
+                        preferred_present_mode: None,
+                    },
+                    None,
+                    gpu_requirements,
+                )
+                .context("creating the macOS WGPU renderer");
+                match result {
+                    Ok(renderer) => renderer,
+                    Err(error) => {
+                        let _: () = msg_send![native_view, release];
+                        let _: () = msg_send![native_window, release];
+                        pool.drain();
+                        return Err(error);
+                    }
+                }
+            };
+
+            #[cfg(not(feature = "wgpu"))]
+            let renderer = renderer::new_renderer(
+                renderer_context,
+                native_window as *mut _,
+                native_view as *mut _,
+                bounds.size.map(|pixels| pixels.as_f32()),
+                false,
+            );
+
             let mut window = Self(Arc::new(Mutex::new(MacWindowState {
                 handle,
                 foreground_executor,
@@ -904,13 +993,10 @@ impl MacWindow {
                 cursor_style: CursorStyle::Arrow,
                 cursor_visible,
                 frame_source: None,
-                renderer: renderer::new_renderer(
-                    renderer_context,
-                    native_window as *mut _,
-                    native_view as *mut _,
-                    bounds.size.map(|pixels| pixels.as_f32()),
-                    false,
-                ),
+                renderer,
+                force_render_pending: false,
+                #[cfg(feature = "wgpu")]
+                gpu_recovery_retry_scheduled: false,
                 request_frame_callback: None,
                 event_callback: None,
                 activate_callback: None,
@@ -995,6 +1081,8 @@ impl MacWindow {
 
             content_view.addSubview_(native_view.autorelease());
             native_window.makeFirstResponder_(native_view);
+            #[cfg(feature = "wgpu")]
+            update_window_scale_factor(&window.0);
 
             let app: id = NSApplication::sharedApplication(nil);
             let main_window: id = msg_send![app, mainWindow];
@@ -1110,8 +1198,44 @@ impl MacWindow {
 
             pool.drain();
 
-            window
+            Ok(window)
         }
+    }
+
+    #[cfg(feature = "wgpu")]
+    fn schedule_gpu_recovery_retry(&self, delay: Duration) {
+        let (executor, window_state) = {
+            let mut state = self.0.lock();
+            if state.gpu_recovery_retry_scheduled {
+                return;
+            }
+            state.gpu_recovery_retry_scheduled = true;
+            (state.foreground_executor.clone(), Arc::downgrade(&self.0))
+        };
+
+        let timer = executor.timer(delay);
+        executor
+            .spawn(async move {
+                timer.await;
+                let Some(window_state) = window_state.upgrade() else {
+                    return;
+                };
+
+                let mut state = window_state.lock();
+                state.gpu_recovery_retry_scheduled = false;
+                if state.closed.load(Ordering::Acquire) || !state.renderer.device_lost() {
+                    return;
+                }
+
+                state.force_render_pending = true;
+                if let Some(mut callback) = state.request_frame_callback.take() {
+                    let options = state.next_frame_request();
+                    drop(state);
+                    callback(options);
+                    window_state.lock().request_frame_callback = Some(callback);
+                }
+            })
+            .detach();
     }
 
     pub fn active_window() -> Option<AnyWindowHandle> {
@@ -1579,7 +1703,14 @@ impl PlatformWindow for MacWindow {
     }
 
     fn is_subpixel_rendering_supported(&self) -> bool {
-        false
+        #[cfg(feature = "wgpu")]
+        {
+            self.0.lock().renderer.supports_dual_source_blending()
+        }
+        #[cfg(not(feature = "wgpu"))]
+        {
+            false
+        }
     }
 
     fn set_edited(&mut self, edited: bool) {
@@ -1756,8 +1887,48 @@ impl PlatformWindow for MacWindow {
     }
 
     fn draw(&self, scene: &gpui::Scene) {
-        let mut this = self.0.lock();
-        this.renderer.draw(scene);
+        #[cfg(not(feature = "wgpu"))]
+        {
+            self.0.lock().renderer.draw(scene);
+        }
+
+        #[cfg(feature = "wgpu")]
+        {
+            let retry_after = {
+                let mut state = self.0.lock();
+                if state.renderer.device_lost() {
+                    let raw_window = RawMacWindow::new(state.native_view.as_ptr());
+                    match state.renderer.recover(&raw_window) {
+                        Ok(gpui_wgpu::DeviceRecoveryStatus::Recovered) => {
+                            state.force_render_pending = true;
+                            None
+                        }
+                        Ok(gpui_wgpu::DeviceRecoveryStatus::Pending { retry_after }) => {
+                            Some(retry_after)
+                        }
+                        Err(error) => {
+                            log::warn!(
+                                "macOS WGPU recovery failed, will retry after stabilization: {error:#}"
+                            );
+                            Some(state.renderer.recovery_retry_after())
+                        }
+                    }
+                } else {
+                    if !state.renderer.draw(scene) {
+                        log::error!("failed to render scene");
+                        state.force_render_pending = true;
+                    }
+                    if state.renderer.needs_redraw() {
+                        state.force_render_pending = true;
+                    }
+                    return;
+                }
+            };
+
+            if let Some(retry_after) = retry_after {
+                self.schedule_gpu_recovery_retry(retry_after);
+            }
+        }
     }
 
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
@@ -1765,7 +1936,29 @@ impl PlatformWindow for MacWindow {
     }
 
     fn gpu_specs(&self) -> Option<gpui::GpuSpecs> {
-        None
+        #[cfg(feature = "wgpu")]
+        {
+            Some(self.0.lock().renderer.gpu_specs())
+        }
+        #[cfg(not(feature = "wgpu"))]
+        {
+            None
+        }
+    }
+
+    #[cfg(feature = "wgpu")]
+    fn gpu_context(&self) -> Option<Box<dyn std::any::Any>> {
+        let state = self.0.lock();
+        if state.renderer.device_lost() {
+            return None;
+        }
+        let (device, queue) = state.renderer.gpu_context();
+        Some(Box::new((device, queue)))
+    }
+
+    #[cfg(feature = "wgpu")]
+    fn gpu_device_lost(&self) -> Option<bool> {
+        Some(self.0.lock().renderer.device_lost())
     }
 
     fn update_ime_position(&self, _bounds: Bounds<Pixels>) {
@@ -1977,7 +2170,7 @@ impl PlatformWindow for MacWindow {
         NSBeep()
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(all(any(test, feature = "test-support"), not(feature = "wgpu")))]
     fn render_to_image(&self, scene: &gpui::Scene) -> Result<RgbaImage> {
         let mut this = self.0.lock();
         this.renderer.render_to_image(scene)
@@ -2090,10 +2283,28 @@ unsafe fn get_window_state(object: &Object) -> Arc<Mutex<MacWindowState>> {
     }
 }
 
+/// Returns `None` while AppKit is running superclass initialization, before the window state can
+/// exist. Overrides invoked in that phase must forward to their superclass without touching GPUI
+/// state.
+unsafe fn initialized_window_state(object: &Object) -> Option<Arc<Mutex<MacWindowState>>> {
+    unsafe {
+        let raw: *mut c_void = *object.get_ivar(WINDOW_STATE_IVAR);
+        if raw.is_null() {
+            return None;
+        }
+        let rc1 = Arc::from_raw(raw as *mut Mutex<MacWindowState>);
+        let rc2 = rc1.clone();
+        mem::forget(rc1);
+        Some(rc2)
+    }
+}
+
 unsafe fn drop_window_state(object: &Object) {
     unsafe {
         let raw: *mut c_void = *object.get_ivar(WINDOW_STATE_IVAR);
-        Arc::from_raw(raw as *mut Mutex<MacWindowState>);
+        if !raw.is_null() {
+            drop(Arc::from_raw(raw as *mut Mutex<MacWindowState>));
+        }
     }
 }
 
@@ -2618,12 +2829,20 @@ fn update_window_scale_factor(window_state: &Arc<Mutex<MacWindowState>>) {
     let scale_factor = lock.scale_factor();
     let size = lock.content_size();
     let drawable_size = size.to_device_pixels(scale_factor);
+    #[cfg(not(feature = "wgpu"))]
     if let Some(layer) = lock.renderer.layer() {
         unsafe {
             let _: () = msg_send![
                 layer,
                 setContentsScale: scale_factor as f64
             ];
+        }
+    }
+    #[cfg(feature = "wgpu")]
+    unsafe {
+        let layer: id = msg_send![lock.native_view.as_ptr(), layer];
+        if !layer.is_null() {
+            let _: () = msg_send![layer, setContentsScale: scale_factor as f64];
         }
     }
 
@@ -2699,8 +2918,9 @@ extern "C" fn window_did_change_key_status(this: &Object, selector: Sel, _: id) 
             if let Some(mut callback) = lock.request_frame_callback.take() {
                 lock.renderer.set_presents_with_transaction(true);
                 lock.stop_display_link();
+                let options = lock.next_frame_request();
                 drop(lock);
-                callback(Default::default());
+                callback(options);
 
                 let mut lock = window_state.lock();
                 lock.request_frame_callback = Some(callback);
@@ -2758,14 +2978,24 @@ extern "C" fn close_window(this: &Object, _: Sel) {
     }
 }
 
+#[cfg(not(feature = "wgpu"))]
 extern "C" fn make_backing_layer(this: &Object, _: Sel) -> id {
     let window_state = unsafe { get_window_state(this) };
     let window_state = window_state.as_ref().lock();
     window_state.renderer.layer_ptr() as id
 }
 
+#[cfg(feature = "wgpu")]
+extern "C" fn make_backing_layer(_: &Object, _: Sel) -> id {
+    // NSView owns this backing layer; WGPU retains the same layer across surface recreation.
+    // Layer creation can precede installation of windowState during NSView initialization.
+    unsafe { msg_send![class!(CAMetalLayer), layer] }
+}
+
 extern "C" fn view_did_change_backing_properties(this: &Object, _: Sel) {
-    let window_state = unsafe { get_window_state(this) };
+    let Some(window_state) = (unsafe { initialized_window_state(this) }) else {
+        return;
+    };
     update_window_scale_factor(&window_state);
 }
 
@@ -2777,21 +3007,23 @@ extern "C" fn set_frame_size(this: &Object, _: Sel, size: NSSize) {
         }
     }
 
-    let window_state = unsafe { get_window_state(this) };
-    let mut lock = window_state.as_ref().lock();
-
-    let new_size = convert(size);
     let old_size = unsafe {
         let old_frame: NSRect = msg_send![this, frame];
         convert(old_frame.size)
     };
-
-    if old_size == new_size {
-        return;
-    }
-
     unsafe {
         let _: () = msg_send![super(this, class!(NSView)), setFrameSize: size];
+    }
+
+    // `initWithFrame:` may dispatch here before `windowState` is installed. Superclass
+    // initialization is complete at this point, but there is no renderer to resize yet.
+    let Some(window_state) = (unsafe { initialized_window_state(this) }) else {
+        return;
+    };
+    let mut lock = window_state.as_ref().lock();
+    let new_size = convert(size);
+    if old_size == new_size {
+        return;
     }
 
     let scale_factor = lock.scale_factor();
@@ -2808,13 +3040,16 @@ extern "C" fn set_frame_size(this: &Object, _: Sel, size: NSSize) {
 }
 
 extern "C" fn display_layer(this: &Object, _: Sel, _: id) {
-    let window_state = unsafe { get_window_state(this) };
+    let Some(window_state) = (unsafe { initialized_window_state(this) }) else {
+        return;
+    };
     let mut lock = window_state.lock();
     if let Some(mut callback) = lock.request_frame_callback.take() {
         lock.renderer.set_presents_with_transaction(true);
         lock.stop_display_link();
+        let options = lock.next_frame_request();
         drop(lock);
-        callback(Default::default());
+        callback(options);
 
         let mut lock = window_state.lock();
         lock.request_frame_callback = Some(callback);
@@ -2829,8 +3064,9 @@ extern "C" fn step(view: *mut c_void) {
     let mut lock = window_state.lock();
 
     if let Some(mut callback) = lock.request_frame_callback.take() {
+        let options = lock.next_frame_request();
         drop(lock);
-        callback(Default::default());
+        callback(options);
         window_state.lock().request_frame_callback = Some(callback);
     }
 }

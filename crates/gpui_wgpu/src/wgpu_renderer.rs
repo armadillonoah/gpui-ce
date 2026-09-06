@@ -1427,6 +1427,19 @@ impl WgpuRenderer {
         self.dual_source_blending
     }
 
+    #[cfg(target_os = "macos")]
+    pub fn set_presents_with_transaction(&self, enabled: bool) {
+        let Some(resources) = self.resources.as_ref() else {
+            return;
+        };
+        if let Some(surface) = unsafe { resources.surface.as_hal::<wgpu::hal::api::Metal>() } {
+            surface
+                .render_layer()
+                .lock()
+                .setPresentsWithTransaction(enabled);
+        }
+    }
+
     pub fn gpu_context(&self) -> (Arc<wgpu::Device>, Arc<wgpu::Queue>) {
         let resources = self.resources();
         (resources.device.clone(), resources.queue.clone())
@@ -1940,7 +1953,12 @@ impl WgpuRenderer {
         )
     }
 
-    #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "windows"))]
+    #[cfg(any(
+        target_os = "linux",
+        target_os = "freebsd",
+        target_os = "windows",
+        all(target_os = "macos", feature = "wgpu-surfaces")
+    ))]
     fn draw_surfaces(&self, surfaces: &[PaintSurface], pass: &mut wgpu::RenderPass<'_>) -> bool {
         let resources = self.resources();
         for surface in surfaces {
@@ -2002,7 +2020,12 @@ impl WgpuRenderer {
         true
     }
 
-    #[cfg(not(any(target_os = "linux", target_os = "freebsd", target_os = "windows")))]
+    #[cfg(not(any(
+        target_os = "linux",
+        target_os = "freebsd",
+        target_os = "windows",
+        all(target_os = "macos", feature = "wgpu-surfaces")
+    )))]
     fn draw_surfaces(&self, _surfaces: &[PaintSurface], _pass: &mut wgpu::RenderPass<'_>) -> bool {
         true
     }
@@ -2993,3 +3016,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(all(test, target_os = "macos", feature = "wgpu-surfaces"))]
+#[path = "wgpu_renderer/texture_surface_tests.rs"]
+mod texture_surface_tests;

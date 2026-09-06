@@ -173,6 +173,8 @@ pub(crate) struct MacPlatformState {
     foreground_executor: ForegroundExecutor,
     text_system: Arc<dyn PlatformTextSystem>,
     renderer_context: renderer::Context,
+    #[cfg(feature = "wgpu")]
+    gpu_requirements: Option<gpui_wgpu::WgpuDeviceRequirements>,
     headless: bool,
     activation_policy: Option<MacActivationPolicy>,
     general_pasteboard: Pasteboard,
@@ -225,6 +227,8 @@ impl MacPlatform {
             background_executor: BackgroundExecutor::new(dispatcher.clone()),
             foreground_executor: ForegroundExecutor::new(dispatcher),
             renderer_context: renderer::Context::default(),
+            #[cfg(feature = "wgpu")]
+            gpu_requirements: None,
             activation_policy: None,
             general_pasteboard: Pasteboard::general(),
             find_pasteboard: Pasteboard::find(),
@@ -651,6 +655,16 @@ impl Platform for MacPlatform {
         Some(MacWindow::ordered_windows())
     }
 
+    #[cfg(feature = "wgpu")]
+    fn set_gpu_requirements(&self, requirements: Box<dyn std::any::Any>) {
+        match requirements.downcast::<gpui_wgpu::WgpuDeviceRequirements>() {
+            Ok(requirements) => self.0.lock().gpu_requirements = Some(*requirements),
+            Err(_) => {
+                log::warn!("set_gpu_requirements: expected WgpuDeviceRequirements on macOS")
+            }
+        }
+    }
+
     fn open_window(
         &self,
         handle: AnyWindowHandle,
@@ -672,6 +686,9 @@ impl Platform for MacPlatform {
             )
         };
 
+        #[cfg(feature = "wgpu")]
+        let gpu_requirements = self.0.lock().gpu_requirements.clone();
+
         Ok(Box::new(MacWindow::open(
             handle,
             options,
@@ -679,7 +696,9 @@ impl Platform for MacPlatform {
             foreground_executor,
             background_executor,
             renderer_context,
-        )))
+            #[cfg(feature = "wgpu")]
+            gpu_requirements,
+        )?))
     }
 
     fn window_appearance(&self) -> WindowAppearance {

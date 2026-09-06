@@ -27,9 +27,14 @@ pub struct CompositorGpuHint {
 /// [`gpui::App::set_gpu_requirements`] *before* opening any windows.
 #[derive(Clone, Debug, Default)]
 pub struct WgpuDeviceRequirements {
-    /// Additional [`wgpu::Features`] to enable.  These are OR-ed with gpui's
-    /// own required features.
+    /// Additional [`wgpu::Features`] that must be enabled. These are OR-ed
+    /// with gpui's own required features; device creation fails when the
+    /// selected adapter does not support one of them.
     pub features: wgpu::Features,
+    /// Additional [`wgpu::Features`] to enable when the selected adapter
+    /// supports them. Unsupported optional features are omitted rather than
+    /// causing device creation to fail.
+    pub optional_features: wgpu::Features,
     /// Additional [`wgpu::Limits`] to request.  Each field is merged by taking
     /// `max(gpui_limit, app_limit)` for upper-bound limits and
     /// `min(gpui_limit, app_limit)` for alignment/lower-bound limits.
@@ -181,9 +186,12 @@ impl WgpuContext {
             .using_resolution(adapter.limits())
             .using_alignment(adapter.limits());
 
-        // Merge application-requested requirements.
+        // Merge application-requested requirements. Required features retain
+        // request-device validation, while optional features are intersected
+        // with the selected adapter's advertised capabilities.
+        required_features =
+            requested_features(required_features, adapter.features(), extra_requirements);
         if let Some(reqs) = extra_requirements {
-            required_features |= reqs.features;
             required_limits = required_limits.or_better_values_from(&reqs.limits);
         }
 
@@ -209,7 +217,9 @@ impl WgpuContext {
 
     #[cfg(not(target_family = "wasm"))]
     pub fn instance(display: Box<dyn wgpu::wgt::WgpuHasDisplayHandle>) -> wgpu::Instance {
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(target_os = "macos")]
+        let backends = wgpu::Backends::METAL;
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
         let backends = wgpu::Backends::VULKAN | wgpu::Backends::GL;
         #[cfg(target_os = "windows")]
         let backends = wgpu::Backends::DX12;
@@ -480,6 +490,17 @@ impl WgpuContext {
     }
 }
 
+fn requested_features(
+    baseline: wgpu::Features,
+    supported: wgpu::Features,
+    requirements: Option<&WgpuDeviceRequirements>,
+) -> wgpu::Features {
+    let Some(requirements) = requirements else {
+        return baseline;
+    };
+    baseline | requirements.features | (requirements.optional_features & supported)
+}
+
 #[cfg(not(target_family = "wasm"))]
 fn parse_pci_id(id: &str) -> anyhow::Result<u32> {
     let mut id = id.trim();
@@ -499,7 +520,28 @@ fn parse_pci_id(id: &str) -> anyhow::Result<u32> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_pci_id;
+    use super::{WgpuDeviceRequirements, parse_pci_id, requested_features};
+
+    #[test]
+    fn optional_device_features_are_limited_to_adapter_support() {
+        let baseline = wgpu::Features::DUAL_SOURCE_BLENDING;
+        let requirements = WgpuDeviceRequirements {
+            features: wgpu::Features::TEXTURE_COMPRESSION_BC,
+            optional_features: wgpu::Features::TEXTURE_COMPRESSION_BC_SLICED_3D
+                | wgpu::Features::TEXTURE_COMPRESSION_ASTC,
+            limits: wgpu::Limits::downlevel_defaults(),
+        };
+        let requested = requested_features(
+            baseline,
+            wgpu::Features::TEXTURE_COMPRESSION_BC_SLICED_3D,
+            Some(&requirements),
+        );
+
+        assert!(requested.contains(baseline));
+        assert!(requested.contains(wgpu::Features::TEXTURE_COMPRESSION_BC));
+        assert!(requested.contains(wgpu::Features::TEXTURE_COMPRESSION_BC_SLICED_3D));
+        assert!(!requested.contains(wgpu::Features::TEXTURE_COMPRESSION_ASTC));
+    }
 
     #[test]
     fn test_parse_device_id() {

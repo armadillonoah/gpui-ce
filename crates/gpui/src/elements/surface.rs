@@ -2,20 +2,12 @@ use crate::{
     App, Bounds, Element, ElementId, GlobalElementId, InspectorElementId, IntoElement, LayoutId,
     ObjectFit, Pixels, Style, StyleRefinement, Styled, Window,
 };
-#[cfg(any(
-    target_os = "linux",
-    target_os = "freebsd",
-    all(target_os = "windows", feature = "wgpu-surfaces")
-))]
+#[cfg(any(target_os = "linux", target_os = "freebsd", feature = "wgpu-surfaces"))]
 use crate::{DevicePixels, Size};
 #[cfg(target_os = "macos")]
 use core_video::pixel_buffer::CVPixelBuffer;
 use refineable::Refineable;
-#[cfg(any(
-    target_os = "linux",
-    target_os = "freebsd",
-    all(target_os = "windows", feature = "wgpu-surfaces")
-))]
+#[cfg(any(target_os = "linux", target_os = "freebsd", feature = "wgpu-surfaces"))]
 use std::sync::Arc;
 
 /// A source of a surface's content.
@@ -24,11 +16,7 @@ pub enum SurfaceSource {
     #[cfg(target_os = "macos")]
     Surface(CVPixelBuffer),
     /// A GPU texture handle (type-erased to avoid depending on wgpu)
-    #[cfg(any(
-        target_os = "linux",
-        target_os = "freebsd",
-        all(target_os = "windows", feature = "wgpu-surfaces")
-    ))]
+    #[cfg(any(target_os = "linux", target_os = "freebsd", feature = "wgpu-surfaces"))]
     Texture {
         /// The GPU texture, type-erased (expected to be `Arc<wgpu::Texture>`)
         texture: Arc<dyn std::any::Any + Send + Sync>,
@@ -42,11 +30,7 @@ impl Clone for SurfaceSource {
         match *self {
             #[cfg(target_os = "macos")]
             SurfaceSource::Surface(ref buf) => SurfaceSource::Surface(buf.clone()),
-            #[cfg(any(
-                target_os = "linux",
-                target_os = "freebsd",
-                all(target_os = "windows", feature = "wgpu-surfaces")
-            ))]
+            #[cfg(any(target_os = "linux", target_os = "freebsd", feature = "wgpu-surfaces"))]
             SurfaceSource::Texture { ref texture, size } => SurfaceSource::Texture {
                 texture: Arc::clone(texture),
                 size,
@@ -60,11 +44,7 @@ impl std::fmt::Debug for SurfaceSource {
         match *self {
             #[cfg(target_os = "macos")]
             SurfaceSource::Surface(ref buf) => _f.debug_tuple("Surface").field(buf).finish(),
-            #[cfg(any(
-                target_os = "linux",
-                target_os = "freebsd",
-                all(target_os = "windows", feature = "wgpu-surfaces")
-            ))]
+            #[cfg(any(target_os = "linux", target_os = "freebsd", feature = "wgpu-surfaces"))]
             SurfaceSource::Texture { size, .. } => _f
                 .debug_struct("Texture")
                 .field("size", &size)
@@ -151,18 +131,18 @@ impl Element for Surface {
         _: &mut App,
     ) {
         match self.source {
-            #[cfg(target_os = "macos")]
+            #[cfg(all(target_os = "macos", not(feature = "wgpu-surfaces")))]
             SurfaceSource::Surface(ref surface) => {
                 let size = crate::size(surface.get_width().into(), surface.get_height().into());
                 let new_bounds = self.object_fit.get_bounds(_bounds, size);
                 // TODO: Add support for corner_radii
                 _window.paint_surface(new_bounds, surface.clone());
             }
-            #[cfg(any(
-                target_os = "linux",
-                target_os = "freebsd",
-                all(target_os = "windows", feature = "wgpu-surfaces")
-            ))]
+            #[cfg(all(target_os = "macos", feature = "wgpu-surfaces"))]
+            SurfaceSource::Surface(_) => {
+                log::error!("CoreVideo surfaces are not supported by the macOS WGPU renderer");
+            }
+            #[cfg(any(target_os = "linux", target_os = "freebsd", feature = "wgpu-surfaces"))]
             SurfaceSource::Texture {
                 ref texture,
                 ref size,

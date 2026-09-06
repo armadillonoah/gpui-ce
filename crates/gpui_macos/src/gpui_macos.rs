@@ -16,10 +16,19 @@ mod system_notifications;
 #[cfg(feature = "screen-capture")]
 mod screen_capture;
 
+#[cfg(not(feature = "wgpu"))]
 mod metal_atlas;
+#[cfg(not(feature = "wgpu"))]
 pub mod metal_renderer;
 
+#[cfg(not(feature = "wgpu"))]
 use metal_renderer as renderer;
+
+#[cfg(feature = "wgpu")]
+mod renderer {
+    pub(crate) type Context = gpui_wgpu::GpuContext;
+    pub(crate) type Renderer = gpui_wgpu::WgpuRenderer;
+}
 
 #[cfg(feature = "font-kit")]
 mod open_type;

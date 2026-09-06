@@ -974,19 +974,11 @@ pub struct PaintSurface {
     pub order: DrawOrder,
     pub bounds: Bounds<ScaledPixels>,
     pub content_mask: ContentMask<ScaledPixels>,
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", not(feature = "wgpu-surfaces")))]
     pub image_buffer: core_video::pixel_buffer::CVPixelBuffer,
-    #[cfg(any(
-        target_os = "linux",
-        target_os = "freebsd",
-        all(target_os = "windows", feature = "wgpu-surfaces")
-    ))]
+    #[cfg(any(target_os = "linux", target_os = "freebsd", feature = "wgpu-surfaces"))]
     pub texture: std::sync::Arc<dyn std::any::Any + Send + Sync>,
-    #[cfg(any(
-        target_os = "linux",
-        target_os = "freebsd",
-        all(target_os = "windows", feature = "wgpu-surfaces")
-    ))]
+    #[cfg(any(target_os = "linux", target_os = "freebsd", feature = "wgpu-surfaces"))]
     pub texture_size: Size<crate::DevicePixels>,
 }
 

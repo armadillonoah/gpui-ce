@@ -24,7 +24,7 @@ screen-capture = [
 runtime_shaders = ["gpui_macos/runtime_shaders"]
 wayland = ["gpui_linux/wayland"]
 x11 = ["gpui_linux/x11"]
-wgpu = ["gpui_windows/wgpu"]
+wgpu = ["gpui_macos/wgpu", "gpui_windows/wgpu"]
 
 [dependencies]
 gpui.workspace = true
@@ -42,3 +42,11 @@ gpui_linux.workspace = true
 [target.'cfg(target_family = "wasm")'.dependencies]
 gpui_web.workspace = true
 console_error_panic_hook.workspace = true
+
+[dev-dependencies]
+gpui_wgpu.workspace = true
+
+[[example]]
+name = "wgpu_texture_surface"
+path = "examples/wgpu_texture_surface.rs"
+required-features = ["wgpu"]

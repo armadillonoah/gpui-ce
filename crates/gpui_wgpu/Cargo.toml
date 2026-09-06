@@ -14,6 +14,7 @@ path = "src/gpui_wgpu.rs"
 [features]
 default = []
 font-kit = ["dep:font-kit"]
+wgpu-surfaces = ["gpui/wgpu-surfaces"]
 
 [dependencies]
 gpui.workspace = true
@@ -59,3 +60,6 @@ naga = { version = "29.0.4", features = ["wgsl-in"] }
 [[bench]]
 name = "layout_line"
 harness = false
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+metal.workspace = true
