@@ -1,8 +1,8 @@
 use crate::{CompositorGpuHint, WgpuAtlas, WgpuContext, WgpuDeviceRequirements};
 use bytemuck::{Pod, Zeroable};
 use gpui::{
-    AtlasTextureId, BackdropFilter, Background, Bounds, DevicePixels, FilterBoundary, GpuSpecs,
-    MonochromeSprite, PaintSurface, Path, Point, PolychromeSprite, PrimitiveBatch, Quad,
+    AtlasTextureId, BackdropFilter, Background, Bounds, Corners, DevicePixels, FilterBoundary,
+    GpuSpecs, MonochromeSprite, PaintSurface, Path, Point, PolychromeSprite, PrimitiveBatch, Quad,
     ScaledFilter, ScaledPixels, Scene, Shadow, Size, SubpixelSprite, Underline,
     get_gamma_correction_ratios,
 };
@@ -55,6 +55,27 @@ impl From<Bounds<ScaledPixels>> for PodBounds {
 struct SurfaceParams {
     bounds: PodBounds,
     content_mask: PodBounds,
+    corner_radii: PodCorners,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default, Pod, Zeroable)]
+struct PodCorners {
+    top_left: f32,
+    top_right: f32,
+    bottom_right: f32,
+    bottom_left: f32,
+}
+
+impl From<Corners<ScaledPixels>> for PodCorners {
+    fn from(corners: Corners<ScaledPixels>) -> Self {
+        Self {
+            top_left: corners.top_left.0,
+            top_right: corners.top_right.0,
+            bottom_right: corners.bottom_right.0,
+            bottom_left: corners.bottom_left.0,
+        }
+    }
 }
 
 /// Uniform passed to the blur pipelines. The same struct drives the downsample, separable
@@ -1971,6 +1992,7 @@ impl WgpuRenderer {
             let params = SurfaceParams {
                 bounds: surface.bounds.into(),
                 content_mask: surface.content_mask.bounds.into(),
+                corner_radii: surface.corner_radii.into(),
             };
 
             let slot = self.surface_params_slot.get();

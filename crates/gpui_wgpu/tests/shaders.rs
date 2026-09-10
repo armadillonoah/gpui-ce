@@ -80,3 +80,21 @@ fn gradient_dither_is_centralized_and_preserves_alpha_endpoints() {
         gradient.contains("background.tag == 1u || background.tag == 4u || background.tag == 5u")
     );
 }
+
+#[test]
+fn surface_fragment_clips_to_the_element_corner_radii() {
+    let params = shader_section("struct SurfaceParams", "@group(1) @binding(0)");
+    assert!(
+        params.contains("corner_radii: Corners"),
+        "SurfaceParams should carry the element's corner radii"
+    );
+    let fragment = shader_section("fn fs_surface", "// --- blur --- //");
+    assert!(
+        fragment.contains("quad_sdf(input.position.xy, surface_locals.bounds, surface_locals.corner_radii)"),
+        "fs_surface should measure the rounded-quad distance"
+    );
+    assert!(
+        fragment.contains("blend_color(sample, saturate(0.5 - distance))"),
+        "fs_surface should fade the sample by that distance like a sprite"
+    );
+}

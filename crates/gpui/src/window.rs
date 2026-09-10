@@ -4613,17 +4613,24 @@ impl Window {
     ///
     /// This method should only be called as part of the paint phase of element drawing.
     #[cfg(all(target_os = "macos", not(feature = "wgpu-surfaces")))]
-    pub fn paint_surface(&mut self, bounds: Bounds<Pixels>, image_buffer: CVPixelBuffer) {
+    pub fn paint_surface(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        corner_radii: Corners<Pixels>,
+        image_buffer: CVPixelBuffer,
+    ) {
         use crate::PaintSurface;
 
         self.invalidator.debug_assert_paint();
 
+        let scale_factor = self.scale_factor();
         let bounds = self.snap_bounds(bounds);
         let content_mask = self.snapped_content_mask();
         self.next_frame.scene.insert_primitive(PaintSurface {
             order: 0,
             bounds,
             content_mask,
+            corner_radii: corner_radii.scale(scale_factor),
             image_buffer,
         });
     }
@@ -4635,6 +4642,7 @@ impl Window {
     pub fn paint_surface(
         &mut self,
         bounds: Bounds<Pixels>,
+        corner_radii: Corners<Pixels>,
         texture: std::sync::Arc<dyn std::any::Any + Send + Sync>,
         texture_size: Size<DevicePixels>,
     ) {
@@ -4649,6 +4657,7 @@ impl Window {
             order: 0,
             bounds,
             content_mask,
+            corner_radii: corner_radii.scale(scale_factor),
             texture,
             texture_size,
         });

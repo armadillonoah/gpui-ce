@@ -974,6 +974,8 @@ pub struct PaintSurface {
     pub order: DrawOrder,
     pub bounds: Bounds<ScaledPixels>,
     pub content_mask: ContentMask<ScaledPixels>,
+    /// The element's corner radii; the surface is clipped to them like a quad or an image.
+    pub corner_radii: Corners<ScaledPixels>,
     #[cfg(all(target_os = "macos", not(feature = "wgpu-surfaces")))]
     pub image_buffer: core_video::pixel_buffer::CVPixelBuffer,
     #[cfg(any(target_os = "linux", target_os = "freebsd", feature = "wgpu-surfaces"))]

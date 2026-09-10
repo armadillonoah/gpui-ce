@@ -130,13 +130,16 @@ impl Element for Surface {
         _window: &mut Window,
         _: &mut App,
     ) {
+        let mut style = Style::default();
+        style.refine(&self.style);
+        let corner_radii = style.corner_radii.to_pixels(_window.rem_size());
         match self.source {
             #[cfg(all(target_os = "macos", not(feature = "wgpu-surfaces")))]
             SurfaceSource::Surface(ref surface) => {
                 let size = crate::size(surface.get_width().into(), surface.get_height().into());
                 let new_bounds = self.object_fit.get_bounds(_bounds, size);
-                // TODO: Add support for corner_radii
-                _window.paint_surface(new_bounds, surface.clone());
+                let corner_radii = corner_radii.clamp_radii_for_quad_size(new_bounds.size);
+                _window.paint_surface(new_bounds, corner_radii, surface.clone());
             }
             #[cfg(all(target_os = "macos", feature = "wgpu-surfaces"))]
             SurfaceSource::Surface(_) => {
@@ -148,7 +151,8 @@ impl Element for Surface {
                 ref size,
             } => {
                 let new_bounds = self.object_fit.get_bounds(_bounds, *size);
-                _window.paint_surface(new_bounds, Arc::clone(texture), *size);
+                let corner_radii = corner_radii.clamp_radii_for_quad_size(new_bounds.size);
+                _window.paint_surface(new_bounds, corner_radii, Arc::clone(texture), *size);
             }
         }
     }
