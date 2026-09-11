@@ -132,14 +132,11 @@ impl WgpuRenderer {
         let uniforms = SurfaceUniforms {
             bounds: surface.bounds.into(),
             content_mask: surface.content_mask.into(),
+            corner_radii: surface.corner_radii.into(),
             color_format,
             opacity,
+            corner_smoothing: surface.corner_smoothing,
             padding0: 0,
-            padding1: 0,
-            padding2: 0,
-            padding3: 0,
-            padding4: 0,
-            padding5: 0,
         };
         let resources = self.resources();
         let uniform_offset = resources.surface_uniforms.write(&uniforms);

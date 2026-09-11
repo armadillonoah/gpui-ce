@@ -5188,16 +5188,38 @@ impl Window {
 
     /// Paint a surface into the scene for the next frame at the current z-index.
     ///
+    /// The surface is clipped to `corner_radii`, which are clamped to its bounds the
+    /// way an image's are, so a rounded frame holding a surface shows no square corners.
+    ///
     /// This method should only be called as part of the paint phase of element drawing.
     pub fn paint_surface(
         &mut self,
         bounds: Bounds<Pixels>,
+        corner_radii: Corners<Pixels>,
+        source: impl Into<crate::SurfaceSource>,
+    ) {
+        self.paint_surface_with_corner_smoothing(bounds, corner_radii, 0.0, source);
+    }
+
+    /// Paints a surface with smoothed corners.
+    ///
+    /// `corner_smoothing` is clamped to `0.0..=1.0` and shapes the corners with the same
+    /// superellipse the quad and image pipelines use, so a surface's edge matches an
+    /// adjacent quad styled the same way.
+    pub fn paint_surface_with_corner_smoothing(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        corner_radii: Corners<Pixels>,
+        corner_smoothing: f32,
         source: impl Into<crate::SurfaceSource>,
     ) {
         use crate::PaintSurface;
 
         self.invalidator.debug_assert_paint();
 
+        let corner_radii = corner_radii
+            .clamp_radii_for_quad_size(bounds.size)
+            .scale(self.scale_factor());
         let bounds = self.snap_bounds(bounds);
         let content_mask = self.snapped_content_mask();
         self.next_frame.scene.insert_surface(
@@ -5205,6 +5227,8 @@ impl Window {
                 order: 0,
                 bounds,
                 content_mask,
+                corner_radii,
+                corner_smoothing: corner_smoothing.clamp(0.0, 1.0),
                 source: source.into(),
             },
             self.element_opacity(),
@@ -8049,8 +8073,8 @@ mod tests {
         InteractiveElement, LineLayout, LongPressEvent, MouseDownEvent, ParentElement,
         PlatformTextSystem, PreparedRasterStyle, RasterColorEffect, RasterStyleRequest,
         RasterizedGlyph, RequestFrameOptions, ShaderBool, StatefulInteractiveElement, Styled,
-        TestApp, TestAppContext, TestTextSystem, TextLayoutRequest, TouchDragEvent, TouchId,
-        TouchPhase, canvas, div, hsla, img, linear_color_stop, linear_gradient,
+        SurfaceSource, TestApp, TestAppContext, TestTextSystem, TextLayoutRequest, TouchDragEvent,
+        TouchId, TouchPhase, canvas, div, hsla, img, linear_color_stop, linear_gradient, surface,
     };
     use image::{Frame as ImageFrame, ImageBuffer, Rgba};
     use proptest::prelude::*;
@@ -8458,6 +8482,13 @@ mod tests {
                 .size(px(24.))
                 .rounded(px(8.));
             image.style().corner_smoothing = Some(1.5);
+            let mut surface = surface(SurfaceSource::Unsupported(size(
+                DevicePixels(24),
+                DevicePixels(24),
+            )))
+            .size(px(24.))
+            .rounded(px(8.));
+            surface.style().corner_smoothing = Some(1.5);
 
             let mut root = div()
                 .size(px(80.))
@@ -8478,7 +8509,8 @@ mod tests {
                 ])
                 .backdrop_blur(px(4.))
                 .blur(px(2.))
-                .child(image);
+                .child(image)
+                .child(surface);
             root.style().corner_smoothing = Some(1.5);
             root
         }
@@ -8563,6 +8595,14 @@ mod tests {
                         .polychrome_sprites
                         .iter()
                         .map(|image| image.corner_smoothing),
+                );
+                assert_smoothing(
+                    "surfaces",
+                    1,
+                    scene
+                        .surfaces
+                        .iter()
+                        .map(|surface| surface.corner_smoothing),
                 );
                 for inset in [ShaderBool::Disabled, ShaderBool::Enabled] {
                     assert!(scene.shadows.iter().any(|shadow| shadow.inset == inset));
