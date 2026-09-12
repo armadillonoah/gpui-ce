@@ -721,12 +721,14 @@ impl Style {
             _ => {
                 let mut min = bounds.origin;
                 let mut max = bounds.bottom_right();
+                let mut inset = Edges::default();
 
                 if self.border_color.is_some_and(|color| color.alpha > 0.) {
-                    min.x += self.border_widths.left.to_pixels(rem_size);
-                    max.x -= self.border_widths.right.to_pixels(rem_size);
-                    min.y += self.border_widths.top.to_pixels(rem_size);
-                    max.y -= self.border_widths.bottom.to_pixels(rem_size);
+                    inset = self.border_widths.to_pixels(rem_size);
+                    min.x += inset.left;
+                    max.x -= inset.right;
+                    min.y += inset.top;
+                    max.y -= inset.bottom;
                 }
 
                 let bounds = match (
@@ -749,7 +751,29 @@ impl Style {
                     (false, false) => Bounds::from_corners(min, max),
                 };
 
-                Some(ContentMask { bounds })
+                // A ROUNDED element clips its children on its own curve. The radius the child
+                // sees is the INNER one -- the element's radius less the border that sits
+                // between them -- so the two arcs are concentric and no ground shows in the
+                // gap. Without this the mask is a plain rectangle and a child painting to the
+                // element's inner edge draws a square corner past the arc.
+                let radius_of = |radius: AbsoluteLength, first: Pixels, second: Pixels| {
+                    (radius.to_pixels(rem_size) - first.max(second)).max(Pixels::ZERO)
+                };
+                let corner_radii = Corners {
+                    top_left: radius_of(self.corner_radii.top_left, inset.top, inset.left),
+                    top_right: radius_of(self.corner_radii.top_right, inset.top, inset.right),
+                    bottom_right: radius_of(
+                        self.corner_radii.bottom_right,
+                        inset.bottom,
+                        inset.right,
+                    ),
+                    bottom_left: radius_of(self.corner_radii.bottom_left, inset.bottom, inset.left),
+                }
+                .clamp_radii_for_quad_size(bounds.size);
+                Some(ContentMask {
+                    bounds,
+                    corner_radii,
+                })
             }
         }
     }
@@ -1600,5 +1624,100 @@ mod tests {
             Some(FontWeight::SEMIBOLD),
             style.text_style().unwrap().font_weight
         );
+    }
+
+    /// A rounded element that clips its children hands them its OWN curve, so a child painting
+    /// to the element's inner edge cannot draw a square corner past the arc. The radius is the
+    /// inner one -- the element's radius less the border between them -- so the two arcs are
+    /// concentric with no ground showing in the gap.
+    #[test]
+    fn a_rounded_clipping_element_gives_its_children_its_inner_curve() {
+        let mut style = Style::default();
+        style.overflow.x = Overflow::Hidden;
+        style.overflow.y = Overflow::Hidden;
+        style.corner_radii = Corners {
+            top_left: AbsoluteLength::Pixels(px(10.)),
+            top_right: AbsoluteLength::Pixels(px(10.)),
+            bottom_right: AbsoluteLength::Pixels(px(10.)),
+            bottom_left: AbsoluteLength::Pixels(px(10.)),
+        };
+        style.border_widths = Edges {
+            top: AbsoluteLength::Pixels(px(1.)),
+            right: AbsoluteLength::Pixels(px(1.)),
+            bottom: AbsoluteLength::Pixels(px(1.)),
+            left: AbsoluteLength::Pixels(px(1.)),
+        };
+        style.border_color = Some(crate::black());
+
+        let bounds = Bounds {
+            origin: crate::point(px(0.), px(0.)),
+            size: crate::size(px(200.), px(120.)),
+        };
+        let mask = style
+            .overflow_mask(bounds, px(16.))
+            .expect("a hidden overflow makes a mask");
+
+        assert_eq!(mask.corner_radii.top_left, px(9.));
+        assert_eq!(mask.corner_radii.bottom_right, px(9.));
+        // The bounds are inset by the border the same way, so the two agree.
+        assert_eq!(mask.bounds.size.width, px(198.));
+    }
+
+    /// Without a border the inner radius IS the element's radius: there is nothing between the
+    /// curve and the child.
+    #[test]
+    fn a_borderless_rounded_element_passes_its_radius_through_unchanged() {
+        let mut style = Style::default();
+        style.overflow.y = Overflow::Hidden;
+        style.corner_radii = Corners {
+            top_left: AbsoluteLength::Pixels(px(12.)),
+            top_right: AbsoluteLength::Pixels(px(12.)),
+            bottom_right: AbsoluteLength::Pixels(px(12.)),
+            bottom_left: AbsoluteLength::Pixels(px(12.)),
+        };
+
+        let bounds = Bounds {
+            origin: crate::point(px(0.), px(0.)),
+            size: crate::size(px(200.), px(120.)),
+        };
+        let mask = style.overflow_mask(bounds, px(16.)).expect("a mask");
+        assert_eq!(mask.corner_radii.top_left, px(12.));
+    }
+
+    /// A SQUARE clipping element still produces a square mask. Almost every mask in a frame is
+    /// this one, and the shaders take a fast path on it, so it must stay exactly zero.
+    #[test]
+    fn a_square_clipping_element_still_makes_a_square_mask() {
+        let mut style = Style::default();
+        style.overflow.x = Overflow::Hidden;
+        style.overflow.y = Overflow::Hidden;
+
+        let bounds = Bounds {
+            origin: crate::point(px(0.), px(0.)),
+            size: crate::size(px(200.), px(120.)),
+        };
+        let mask = style.overflow_mask(bounds, px(16.)).expect("a mask");
+        assert_eq!(mask.corner_radii, Corners::default());
+    }
+
+    /// A radius larger than the element cannot fold the distance field back on itself.
+    #[test]
+    fn a_radius_larger_than_the_element_is_clamped_to_it() {
+        let mut style = Style::default();
+        style.overflow.x = Overflow::Hidden;
+        style.overflow.y = Overflow::Hidden;
+        style.corner_radii = Corners {
+            top_left: AbsoluteLength::Pixels(px(500.)),
+            top_right: AbsoluteLength::Pixels(px(500.)),
+            bottom_right: AbsoluteLength::Pixels(px(500.)),
+            bottom_left: AbsoluteLength::Pixels(px(500.)),
+        };
+
+        let bounds = Bounds {
+            origin: crate::point(px(0.), px(0.)),
+            size: crate::size(px(200.), px(120.)),
+        };
+        let mask = style.overflow_mask(bounds, px(16.)).expect("a mask");
+        assert_eq!(mask.corner_radii.top_left, px(60.));
     }
 }

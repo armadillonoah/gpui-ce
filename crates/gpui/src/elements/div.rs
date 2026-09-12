@@ -5078,4 +5078,61 @@ mod tests {
 
         assert_eq!(focused, Some(item_b.id));
     }
+
+    /// THE WHOLE CHAIN, end to end. A rounded element that clips its children must hand them its
+    /// curve, or a child painting its own background to the element's inner edge draws a square
+    /// corner in the sliver the arc excludes -- visible as a wedge poking out past the curve.
+    ///
+    /// Asserted on the child's quad in the finished scene, which is what the GPU actually reads.
+    #[crate::test]
+    fn a_child_of_a_rounded_clipping_parent_is_masked_by_the_parents_curve(
+        cx: &mut TestAppContext,
+    ) {
+        let window = cx.add_empty_window();
+        window.draw(point(px(0.), px(0.)), size(px(200.), px(200.)), |_, _| {
+            div()
+                .size_full()
+                .rounded(px(10.))
+                .overflow_hidden()
+                .child(div().size_full().bg(crate::red()))
+                .into_any_element()
+        });
+
+        let (radii, expected) = window.update(|window, _| {
+            (
+                window
+                    .rendered_frame
+                    .scene
+                    .quads
+                    .last()
+                    .map(|quad| quad.content_mask.corner_radii.top_left),
+                px(10.).scale(window.scale_factor()),
+            )
+        });
+        assert_eq!(radii, Some(expected));
+    }
+
+    /// And a SQUARE clipping parent still gives a square mask, so the overwhelmingly common case
+    /// stays exactly what it was and keeps the shaders' fast path.
+    #[crate::test]
+    fn a_child_of_a_square_clipping_parent_keeps_a_square_mask(cx: &mut TestAppContext) {
+        let window = cx.add_empty_window();
+        window.draw(point(px(0.), px(0.)), size(px(200.), px(200.)), |_, _| {
+            div()
+                .size_full()
+                .overflow_hidden()
+                .child(div().size_full().bg(crate::red()))
+                .into_any_element()
+        });
+
+        let radii = window.update(|window, _| {
+            window
+                .rendered_frame
+                .scene
+                .quads
+                .last()
+                .map(|quad| quad.content_mask.corner_radii)
+        });
+        assert_eq!(radii, Some(crate::Corners::default()));
+    }
 }

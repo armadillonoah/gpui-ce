@@ -132,6 +132,14 @@ impl Element for Surface {
     ) {
         let mut style = Style::default();
         style.refine(&self.style);
+        // Not hoisted out of the match: every arm below is behind a cfg, and on a build where
+        // none of them is compiled in this would be an unused binding.
+        #[cfg(any(
+            target_os = "macos",
+            target_os = "linux",
+            target_os = "freebsd",
+            feature = "wgpu-surfaces"
+        ))]
         let corner_radii = style.corner_radii.to_pixels(_window.rem_size());
         match self.source {
             #[cfg(all(target_os = "macos", not(feature = "wgpu-surfaces")))]

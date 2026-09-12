@@ -25,6 +25,11 @@ float dash_alpha(float t, float period, float length, float dash_velocity,
                  float antialias_threshold);
 float quarter_ellipse_sdf(float2 point, float2 radii);
 float pick_corner_radius(float2 center_to_point, Corners_ScaledPixels corner_radii);
+// The CORNER half of a content mask. The rectangle half is handled per vertex by the clip
+// distances; this is what those four linear distances cannot express. Zero radii -- almost every
+// mask -- take the fast path, so nothing clipped by a square parent pays for this.
+float content_mask_coverage(float2 position, ContentMask_ScaledPixels mask);
+
 float quad_sdf(float2 point, Bounds_ScaledPixels bounds,
                Corners_ScaledPixels corner_radii);
 float quad_sdf_impl(float2 center_to_point, float corner_radius);
@@ -99,9 +104,26 @@ vertex QuadVertexOutput quad_vertex(uint unit_vertex_id [[vertex_id]],
       {clip_distance.x, clip_distance.y, clip_distance.z, clip_distance.w}};
 }
 
+float content_mask_coverage(float2 position, ContentMask_ScaledPixels mask) {
+  if (mask.corner_radii.top_left == 0.0 && mask.corner_radii.top_right == 0.0 &&
+      mask.corner_radii.bottom_right == 0.0 && mask.corner_radii.bottom_left == 0.0) {
+    return 1.0;
+  }
+  return saturate(0.5 - quad_sdf(position, mask.bounds, mask.corner_radii));
+}
+
+float4 quad_fragment_shaded(QuadFragmentInput input,
+                              constant Quad *quads);
+
 fragment float4 quad_fragment(QuadFragmentInput input [[stage_in]],
                               constant Quad *quads
                               [[buffer(QuadInputIndex_Quads)]]) {
+  return quad_fragment_shaded(input, quads) *
+         content_mask_coverage(input.position.xy, quads[input.quad_id].content_mask);
+}
+
+float4 quad_fragment_shaded(QuadFragmentInput input,
+                              constant Quad *quads) {
   Quad quad = quads[input.quad_id];
   float4 background_color = fill_color(quad.background, input.position.xy, quad.bounds,
     input.background_solid, input.background_color0, input.background_color1);
@@ -496,9 +518,18 @@ vertex ShadowVertexOutput shadow_vertex(
       {clip_distance.x, clip_distance.y, clip_distance.z, clip_distance.w}};
 }
 
+float4 shadow_fragment_shaded(ShadowFragmentInput input,
+                                constant Shadow *shadows);
+
 fragment float4 shadow_fragment(ShadowFragmentInput input [[stage_in]],
                                 constant Shadow *shadows
                                 [[buffer(ShadowInputIndex_Shadows)]]) {
+  return shadow_fragment_shaded(input, shadows) *
+         content_mask_coverage(input.position.xy, shadows[input.shadow_id].content_mask);
+}
+
+float4 shadow_fragment_shaded(ShadowFragmentInput input,
+                                constant Shadow *shadows) {
   Shadow shadow = shadows[input.shadow_id];
 
   float2 origin = float2(shadow.bounds.origin.x, shadow.bounds.origin.y);
@@ -589,9 +620,18 @@ vertex UnderlineVertexOutput underline_vertex(
       {clip_distance.x, clip_distance.y, clip_distance.z, clip_distance.w}};
 }
 
+float4 underline_fragment_shaded(UnderlineFragmentInput input,
+                                   constant Underline *underlines);
+
 fragment float4 underline_fragment(UnderlineFragmentInput input [[stage_in]],
                                    constant Underline *underlines
                                    [[buffer(UnderlineInputIndex_Underlines)]]) {
+  return underline_fragment_shaded(input, underlines) *
+         content_mask_coverage(input.position.xy, underlines[input.underline_id].content_mask);
+}
+
+float4 underline_fragment_shaded(UnderlineFragmentInput input,
+                                   constant Underline *underlines) {
   const float WAVE_FREQUENCY = 2.0;
   const float WAVE_HEIGHT_RATIO = 0.8;
 
@@ -624,6 +664,7 @@ struct MonochromeSpriteVertexOutput {
   float4 position [[position]];
   float2 tile_position;
   float4 color [[flat]];
+  uint sprite_id [[flat]];
   float4 clip_distance;
 };
 
@@ -631,6 +672,7 @@ struct MonochromeSpriteFragmentInput {
   float4 position [[position]];
   float2 tile_position;
   float4 color [[flat]];
+  uint sprite_id [[flat]];
   float4 clip_distance;
 };
 
@@ -654,13 +696,27 @@ vertex MonochromeSpriteVertexOutput monochrome_sprite_vertex(
       device_position,
       tile_position,
       color,
+      sprite_id,
       {clip_distance.x, clip_distance.y, clip_distance.z, clip_distance.w}};
 }
+
+float4 monochrome_sprite_fragment_shaded(
+    MonochromeSpriteFragmentInput input,
+    constant MonochromeSprite *sprites,
+    texture2d<float> atlas_texture);
 
 fragment float4 monochrome_sprite_fragment(
     MonochromeSpriteFragmentInput input [[stage_in]],
     constant MonochromeSprite *sprites [[buffer(SpriteInputIndex_Sprites)]],
     texture2d<float> atlas_texture [[texture(SpriteInputIndex_AtlasTexture)]]) {
+  return monochrome_sprite_fragment_shaded(input, sprites, atlas_texture) *
+         content_mask_coverage(input.position.xy, sprites[input.sprite_id].content_mask);
+}
+
+float4 monochrome_sprite_fragment_shaded(
+    MonochromeSpriteFragmentInput input,
+    constant MonochromeSprite *sprites,
+    texture2d<float> atlas_texture) {
   if (any(input.clip_distance < float4(0.0))) {
     return float4(0.0);
   }
@@ -710,10 +766,23 @@ vertex PolychromeSpriteVertexOutput polychrome_sprite_vertex(
       {clip_distance.x, clip_distance.y, clip_distance.z, clip_distance.w}};
 }
 
+float4 polychrome_sprite_fragment_shaded(
+    PolychromeSpriteFragmentInput input,
+    constant PolychromeSprite *sprites,
+    texture2d<float> atlas_texture);
+
 fragment float4 polychrome_sprite_fragment(
     PolychromeSpriteFragmentInput input [[stage_in]],
     constant PolychromeSprite *sprites [[buffer(SpriteInputIndex_Sprites)]],
     texture2d<float> atlas_texture [[texture(SpriteInputIndex_AtlasTexture)]]) {
+  return polychrome_sprite_fragment_shaded(input, sprites, atlas_texture) *
+         content_mask_coverage(input.position.xy, sprites[input.sprite_id].content_mask);
+}
+
+float4 polychrome_sprite_fragment_shaded(
+    PolychromeSpriteFragmentInput input,
+    constant PolychromeSprite *sprites,
+    texture2d<float> atlas_texture) {
   PolychromeSprite sprite = sprites[input.sprite_id];
   constexpr sampler atlas_texture_sampler(mag_filter::linear,
                                           min_filter::linear);
@@ -1374,6 +1443,8 @@ float4 fill_color(Background background,
 struct BlurParams {
   Bounds_ScaledPixels bounds;
   Bounds_ScaledPixels content_mask;
+  // The mask's own corner radii, so a blur inside a rounded parent follows its curve.
+  Corners_ScaledPixels content_mask_corner_radii;
   Corners_ScaledPixels corner_radii;
   float2 direction;
   float sigma;
@@ -1466,11 +1537,26 @@ vertex BlurCompositeVertexOutput blur_composite_vertex(
   return out;
 }
 
+float4 blur_composite_fragment_shaded(BlurCompositeFragmentInput input,
+                                      texture2d<float> source,
+                                      constant BlurParams &params,
+                                      constant Size_DevicePixels *viewport_size);
+
 fragment float4 blur_composite_fragment(
     BlurCompositeFragmentInput input [[stage_in]],
     texture2d<float> source [[texture(0)]],
     constant BlurParams &params [[buffer(1)]],
     constant Size_DevicePixels *viewport_size [[buffer(2)]]) {
+  ContentMask_ScaledPixels mask = {params.content_mask,
+                                   params.content_mask_corner_radii};
+  return blur_composite_fragment_shaded(input, source, params, viewport_size) *
+         content_mask_coverage(input.position.xy, mask);
+}
+
+float4 blur_composite_fragment_shaded(BlurCompositeFragmentInput input,
+                                      texture2d<float> source,
+                                      constant BlurParams &params,
+                                      constant Size_DevicePixels *viewport_size) {
   constexpr sampler s(mag_filter::linear, min_filter::linear);
   // Sample the half-res blur by screen position, on the SAME fixed 2:1 grid the snapped downsample
   // wrote (anchored at the origin, independent of viewport parity): 2 * the half-res texture size

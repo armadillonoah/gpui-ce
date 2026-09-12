@@ -90,11 +90,67 @@ fn surface_fragment_clips_to_the_element_corner_radii() {
     );
     let fragment = shader_section("fn fs_surface", "// --- blur --- //");
     assert!(
-        fragment.contains("quad_sdf(input.position.xy, surface_locals.bounds, surface_locals.corner_radii)"),
+        fragment.contains(
+            "quad_sdf(input.position.xy, surface_locals.bounds, surface_locals.corner_radii)"
+        ),
         "fs_surface should measure the rounded-quad distance"
     );
     assert!(
         fragment.contains("blend_color(sample, saturate(0.5 - distance))"),
         "fs_surface should fade the sample by that distance like a sprite"
     );
+}
+
+/// EVERY pipeline that carries a content mask honours its corners. A pipeline that is missed
+/// here is one where a child of a rounded parent still paints a square corner, which is the
+/// whole defect -- and it is invisible in a screenshot of any OTHER pipeline, so it has to be
+/// asserted per entry point rather than eyeballed.
+#[test]
+fn every_masked_pipeline_clips_to_its_content_mask_corners() {
+    for entry in [
+        "fs_quad",
+        "fs_shadow",
+        "fs_underline",
+        "fs_mono_sprite",
+        "fs_poly_sprite",
+        "fs_surface",
+        "fs_blur_composite",
+    ] {
+        let wrapper = WGPU_SHADER
+            .split_once(&format!("fn {entry}(input:"))
+            .unwrap_or_else(|| panic!("{entry} should exist"))
+            .1;
+        let body = wrapper
+            .split_once('}')
+            .unwrap_or_else(|| panic!("{entry} should have a body"))
+            .0;
+        assert!(
+            body.contains("masked(") && body.contains("content_mask"),
+            "{entry} should fade by its content mask's corners: {body}"
+        );
+    }
+}
+
+/// The fast path is load-bearing, not an optimisation detail: almost every mask in a frame is
+/// square, and a square mask must cost one comparison rather than a distance field.
+#[test]
+fn a_square_content_mask_costs_nothing_in_the_shader() {
+    let coverage = shader_section("fn content_mask_coverage", "fn masked");
+    assert!(
+        coverage.contains("mask.corner_radii.top_left == 0.0"),
+        "content_mask_coverage should take a fast path on a square mask"
+    );
+    assert!(
+        coverage.contains("return 1.0;"),
+        "and that fast path should be full coverage"
+    );
+}
+
+/// The mask's rectangle half is still the per-vertex clip; only its corners are new. If the
+/// mask type stopped carrying bounds the clip would silently become the whole window.
+#[test]
+fn the_content_mask_type_carries_both_halves_of_the_clip() {
+    let mask = shader_section("struct ContentMask {", "}");
+    assert!(mask.contains("bounds: Bounds"), "{mask}");
+    assert!(mask.contains("corner_radii: Corners"), "{mask}");
 }

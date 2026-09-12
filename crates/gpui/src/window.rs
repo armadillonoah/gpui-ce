@@ -1916,6 +1916,24 @@ pub struct DispatchEventResult {
 pub struct ContentMask<P: Clone + Debug + Default + PartialEq> {
     /// The bounds
     pub bounds: Bounds<P>,
+    /// The corner radii the mask's rectangle is rounded by; all zero for a square mask.
+    ///
+    /// Usually zero, and a zero radius makes the mask exactly the rectangle it always was. They
+    /// are not zero when a rounded element clips its children -- `overflow_hidden` on a
+    /// `rounded(..)` element -- and without them such a child paints a SQUARE corner in the
+    /// sliver the parent's arc excludes, visible as a wedge poking out past the curve wherever
+    /// the child's background differs from the ground behind it.
+    pub corner_radii: Corners<P>,
+}
+
+impl<P: Clone + Debug + Default + PartialEq> ContentMask<P> {
+    /// A square mask over `bounds`: what every mask was before radii existed.
+    pub fn new(bounds: Bounds<P>) -> Self {
+        Self {
+            bounds,
+            corner_radii: Corners::default(),
+        }
+    }
 }
 
 impl ContentMask<Pixels> {
@@ -1923,13 +1941,39 @@ impl ContentMask<Pixels> {
     pub fn scale(&self, factor: f32) -> ContentMask<ScaledPixels> {
         ContentMask {
             bounds: self.bounds.scale(factor),
+            corner_radii: self.corner_radii.scale(factor),
         }
     }
 
     /// Intersect the content mask with the given content mask.
+    ///
+    /// The intersection of two rounded rectangles is not a rounded rectangle, so the radii are
+    /// the larger of the two per corner, clamped to the result. That errs towards rounding a
+    /// corner that did not strictly need it, which is invisible; the other way round leaves the
+    /// square corner this type exists to remove. In practice one mask is square or the two share
+    /// their bounds, and both of those cases are exact.
     pub fn intersect(&self, other: &Self) -> Self {
         let bounds = self.bounds.intersect(&other.bounds);
-        ContentMask { bounds }
+        let corner_radii = Corners {
+            top_left: self.corner_radii.top_left.max(other.corner_radii.top_left),
+            top_right: self
+                .corner_radii
+                .top_right
+                .max(other.corner_radii.top_right),
+            bottom_right: self
+                .corner_radii
+                .bottom_right
+                .max(other.corner_radii.bottom_right),
+            bottom_left: self
+                .corner_radii
+                .bottom_left
+                .max(other.corner_radii.bottom_left),
+        }
+        .clamp_radii_for_quad_size(bounds.size);
+        ContentMask {
+            bounds,
+            corner_radii,
+        }
     }
 }
 
@@ -2725,8 +2769,12 @@ impl Window {
 
     #[inline]
     fn snapped_content_mask(&self) -> ContentMask<ScaledPixels> {
+        let mask = self.content_mask();
         ContentMask {
-            bounds: self.cover_bounds(self.content_mask().bounds),
+            bounds: self.cover_bounds(mask.bounds),
+            // The radii come along unsnapped: they describe a curve, not an edge, and rounding
+            // them to the pixel grid would step a clip that the arc itself antialiases.
+            corner_radii: mask.corner_radii.scale(self.scale_factor()),
         }
     }
 
@@ -3626,15 +3674,12 @@ impl Window {
     /// Obtain the current content mask. This method should only be called during element drawing.
     pub fn content_mask(&self) -> ContentMask<Pixels> {
         self.invalidator.debug_assert_paint_or_prepaint();
-        self.content_mask_stack
-            .last()
-            .cloned()
-            .unwrap_or_else(|| ContentMask {
-                bounds: Bounds {
-                    origin: Point::default(),
-                    size: self.viewport_size,
-                },
+        self.content_mask_stack.last().cloned().unwrap_or_else(|| {
+            ContentMask::new(Bounds {
+                origin: Point::default(),
+                size: self.viewport_size,
             })
+        })
     }
 
     /// Provide elements in the called function with a new namespace in which their identifiers must be unique.
@@ -4178,6 +4223,7 @@ impl Window {
                 self.next_frame.scene.insert_primitive(Quad {
                     content_mask: ContentMask {
                         bounds: content_mask_bounds,
+                        ..quad.content_mask
                     },
                     ..quad
                 });

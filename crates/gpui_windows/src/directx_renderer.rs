@@ -520,7 +520,7 @@ impl DirectXRenderer {
                                 &current_srv,
                                 &current_rtv,
                                 filter.bounds,
-                                filter.content_mask.bounds,
+                                filter.content_mask,
                                 corner_radii_array(filter.corner_radii),
                                 max_blur_radius(&filter.filters),
                                 filter.opacity,
@@ -564,7 +564,7 @@ impl DirectXRenderer {
                                 &current_srv,
                                 &parent_rtv,
                                 boundary.bounds,
-                                boundary.content_mask.bounds,
+                                boundary.content_mask,
                                 corner_radii_array(boundary.corner_radii),
                                 max_blur_radius(&boundary.filters),
                                 boundary.opacity,
@@ -1022,7 +1022,7 @@ impl DirectXRenderer {
         source_srv: &Option<ID3D11ShaderResourceView>,
         target_rtv: &Option<ID3D11RenderTargetView>,
         bounds: Bounds<ScaledPixels>,
-        content_mask: Bounds<ScaledPixels>,
+        content_mask: ContentMask<ScaledPixels>,
         corner_radii: [f32; 4],
         blur_radius: f32,
         opacity: f32,
@@ -1127,7 +1127,8 @@ impl DirectXRenderer {
             &ping_srv,
             BlurParams {
                 bounds: composite_bounds,
-                content_mask,
+                content_mask: content_mask.bounds,
+                content_mask_corner_radii: corner_radii_array(content_mask.corner_radii),
                 corner_radii,
                 opacity,
                 clip_rounded: if clip_rounded { 1.0 } else { 0.0 },
@@ -1473,13 +1474,15 @@ struct GlobalParams {
     _pad: [u32; 3],
 }
 
-/// Mirrors the `BlurParams` cbuffer (register b1) in `shaders.hlsl`. 80 bytes (a multiple of 16,
+/// Mirrors the `BlurParams` cbuffer (register b1) in `shaders.hlsl`. 96 bytes (a multiple of 16,
 /// as constant buffers require). Updated per blur pass via `update_buffer`.
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct BlurParams {
     bounds: Bounds<ScaledPixels>,
     content_mask: Bounds<ScaledPixels>,
+    /// The mask's own corner radii, so a blur inside a rounded parent follows its curve.
+    content_mask_corner_radii: [f32; 4],
     corner_radii: [f32; 4],
     direction: [f32; 2],
     sigma: f32,
@@ -1502,6 +1505,7 @@ impl Default for BlurParams {
         BlurParams {
             bounds: Bounds::default(),
             content_mask: Bounds::default(),
+            content_mask_corner_radii: [0.0; 4],
             corner_radii: [0.0; 4],
             direction: [0.0, 0.0],
             sigma: 0.0,
