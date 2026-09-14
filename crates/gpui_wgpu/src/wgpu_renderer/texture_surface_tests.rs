@@ -90,7 +90,7 @@ fn paint_surface(
     PaintSurface {
         order: 0,
         bounds,
-        content_mask: gpui::ContentMask { bounds: mask },
+        content_mask: gpui::ContentMask::new(mask),
         corner_radii: gpui::Corners::default(),
         texture,
         texture_size: gpui::size(DevicePixels(2), DevicePixels(2)),

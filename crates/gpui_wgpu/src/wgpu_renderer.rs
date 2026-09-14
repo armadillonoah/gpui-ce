@@ -1,10 +1,10 @@
 use crate::{CompositorGpuHint, WgpuAtlas, WgpuContext, WgpuDeviceRequirements};
 use bytemuck::{Pod, Zeroable};
 use gpui::{
-    AtlasTextureId, BackdropFilter, Background, Bounds, Corners, DevicePixels, FilterBoundary,
-    GpuSpecs, MonochromeSprite, PaintSurface, Path, Point, PolychromeSprite, PrimitiveBatch, Quad,
-    ScaledFilter, ScaledPixels, Scene, Shadow, Size, SubpixelSprite, Underline,
-    get_gamma_correction_ratios,
+    AtlasTextureId, BackdropFilter, Background, Bounds, ContentMask, Corners, DevicePixels,
+    FilterBoundary, GpuSpecs, MonochromeSprite, PaintSurface, Path, Point, PolychromeSprite,
+    PrimitiveBatch, Quad, ScaledFilter, ScaledPixels, Scene, Shadow, Size, SubpixelSprite,
+    Underline, get_gamma_correction_ratios,
 };
 use log::warn;
 
@@ -54,7 +54,7 @@ impl From<Bounds<ScaledPixels>> for PodBounds {
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct SurfaceParams {
     bounds: PodBounds,
-    content_mask: PodBounds,
+    content_mask: PodContentMask,
     corner_radii: PodCorners,
 }
 
@@ -78,6 +78,22 @@ impl From<Corners<ScaledPixels>> for PodCorners {
     }
 }
 
+#[repr(C)]
+#[derive(Clone, Copy, Default, Pod, Zeroable)]
+struct PodContentMask {
+    bounds: PodBounds,
+    corner_radii: PodCorners,
+}
+
+impl From<ContentMask<ScaledPixels>> for PodContentMask {
+    fn from(mask: ContentMask<ScaledPixels>) -> Self {
+        Self {
+            bounds: mask.bounds.into(),
+            corner_radii: mask.corner_radii.into(),
+        }
+    }
+}
+
 /// Uniform passed to the blur pipelines. The same struct drives the downsample, separable
 /// gaussian, and composite passes; fields not relevant to a given pass are left zero.
 #[repr(C)]
@@ -85,8 +101,8 @@ impl From<Corners<ScaledPixels>> for PodCorners {
 struct BlurParams {
     /// Composite target rectangle, in device pixels (composite pass only).
     bounds: PodBounds,
-    /// Clip rectangle, in device pixels (composite pass only).
-    content_mask: PodBounds,
+    /// Rounded clip rectangle, in device pixels (composite pass only).
+    content_mask: PodContentMask,
     /// Rounded-corner radii (tl, tr, br, bl), in device pixels (composite pass only).
     corner_radii: [f32; 4],
     /// Per-tap sampling step in UV space (gaussian passes only): (1/width, 0) or (0, 1/height).
@@ -1814,7 +1830,7 @@ impl WgpuRenderer {
                                         &current_target,
                                         &parent,
                                         boundary.bounds,
-                                        boundary.content_mask.bounds,
+                                        boundary.content_mask,
                                         [
                                             boundary.corner_radii.top_left.0,
                                             boundary.corner_radii.top_right.0,
@@ -1991,7 +2007,7 @@ impl WgpuRenderer {
 
             let params = SurfaceParams {
                 bounds: surface.bounds.into(),
-                content_mask: surface.content_mask.bounds.into(),
+                content_mask: surface.content_mask.into(),
                 corner_radii: surface.corner_radii.into(),
             };
 
@@ -2142,7 +2158,7 @@ impl WgpuRenderer {
         source: &wgpu::TextureView,
         target: &wgpu::TextureView,
         bounds: Bounds<ScaledPixels>,
-        content_mask: Bounds<ScaledPixels>,
+        content_mask: ContentMask<ScaledPixels>,
         corner_radii: [f32; 4],
         blur_radius: f32,
         opacity: f32,
@@ -2293,7 +2309,7 @@ impl WgpuRenderer {
             scene_color_view,
             scene_color_view,
             filter.bounds,
-            filter.content_mask.bounds,
+            filter.content_mask,
             [
                 filter.corner_radii.top_left.0,
                 filter.corner_radii.top_right.0,
@@ -3042,3 +3058,7 @@ mod tests {
 #[cfg(all(test, target_os = "macos", feature = "wgpu-surfaces"))]
 #[path = "wgpu_renderer/texture_surface_tests.rs"]
 mod texture_surface_tests;
+
+#[cfg(test)]
+#[path = "wgpu_renderer/uniform_layout_tests.rs"]
+mod uniform_layout_tests;
