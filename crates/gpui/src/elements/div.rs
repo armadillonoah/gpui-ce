@@ -5136,3 +5136,56 @@ mod tests {
         assert_eq!(radii, Some(crate::Corners::default()));
     }
 }
+
+#[cfg(test)]
+mod rounded_clip {
+    use crate::{TestAppContext, div, prelude::*, point, px, size};
+
+    /// A mask is a rounded rectangle, so its radii must fit the bounds they round. A bordered
+    /// quad is normally split into four strips carried by masks of their own; giving those
+    /// strips the surrounding mask's radii rounded each strip's ends away and left a control's
+    /// border as four detached lines with no corners.
+    #[crate::test]
+    fn a_bordered_control_inside_a_rounded_panel_keeps_its_corners(cx: &mut TestAppContext) {
+        let window = cx.add_empty_window();
+        window.draw(point(px(0.), px(0.)), size(px(400.), px(400.)), |_, _| {
+            div()
+                .size_full()
+                .rounded(px(10.))
+                .overflow_hidden()
+                .child(
+                    div().absolute().left(px(100.)).top(px(100.)).w(px(72.)).h(px(28.))
+                        .rounded(px(4.))
+                        .border_1()
+                        .border_color(crate::red()),
+                )
+                .into_any_element()
+        });
+
+        let oversized = window.update(|window, _| {
+            window
+                .rendered_frame
+                .scene
+                .quads
+                .iter()
+                .filter(|quad| {
+                    let mask = quad.content_mask;
+                    let half = mask.bounds.size.width.min(mask.bounds.size.height) / 2.;
+                    [
+                        mask.corner_radii.top_left,
+                        mask.corner_radii.top_right,
+                        mask.corner_radii.bottom_right,
+                        mask.corner_radii.bottom_left,
+                    ]
+                    .into_iter()
+                    .any(|radius| radius > half)
+                })
+                .map(|quad| format!("{:?} rounded by {:?}", quad.content_mask.bounds, quad.content_mask.corner_radii))
+                .collect::<Vec<_>>()
+        });
+        assert!(
+            oversized.is_empty(),
+            "no mask may be rounded by more than it can hold: {oversized:?}"
+        );
+    }
+}

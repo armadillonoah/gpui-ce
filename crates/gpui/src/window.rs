@@ -4165,6 +4165,16 @@ impl Window {
             return;
         }
 
+        // The strips below are expressed as CONTENT MASKS, and a content mask is a rounded
+        // rectangle. Handing a strip the surrounding mask's radii with the strip's own bounds
+        // would round the strip's ends, which eats the border's corners and leaves four
+        // detached straight lines. A rounded clip is the rare case -- only inside a rounded
+        // element that clips -- so such a quad is painted whole instead of split.
+        if quad.content_mask.corner_radii != Corners::default() {
+            self.next_frame.scene.insert_primitive(quad);
+            return;
+        }
+
         // We're drawing a quad with a border but no fill color. Painting this quad would run the quad shader for every
         // transparent interior pixel, which is especially costly when the quad is large.
         // Instead, split it into four non-overlapping strips that cover the regions where borders are painted:
