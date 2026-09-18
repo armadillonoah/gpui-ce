@@ -221,6 +221,7 @@ impl Platform for WebPlatform {
         Task::ready(Ok(()))
     }
 
+    /// Every option, `file_types` among them, is ignored: the web has no path prompt at all.
     fn prompt_for_paths(
         &self,
         _options: PathPromptOptions,

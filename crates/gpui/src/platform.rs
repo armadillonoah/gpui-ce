@@ -2171,6 +2171,16 @@ pub enum TextRenderingMode {
     Grayscale,
 }
 
+/// One selectable file type in a file dialog's type chooser.
+#[derive(Clone, Debug)]
+pub struct PathPromptFileType {
+    /// The label for this row, such as `"STEP (*.step;*.stp)"`.
+    pub name: SharedString,
+    /// The extensions this row admits, lower case and without a leading dot, such as
+    /// `["step", "stp"]`.
+    pub extensions: Vec<SharedString>,
+}
+
 /// The options that can be configured for a file dialog prompt
 #[derive(Clone, Debug)]
 pub struct PathPromptOptions {
@@ -2182,6 +2192,14 @@ pub struct PathPromptOptions {
     pub multiple: bool,
     /// The prompt to show to a user when selecting a path
     pub prompt: Option<SharedString>,
+    /// The file types the dialog offers, in the order shown; the first one is selected.
+    ///
+    /// An empty list leaves the dialog unfiltered, which is the behaviour of a dialog that
+    /// never asked for types. Windows shows one row per entry. macOS admits the union of
+    /// every entry's extensions and shows no chooser: AppKit has no per-row type chooser
+    /// without an accessory view, so the union is the honest most this can mean there.
+    /// Linux and the web ignore the field.
+    pub file_types: Vec<PathPromptFileType>,
 }
 
 /// What kind of prompt styling to show

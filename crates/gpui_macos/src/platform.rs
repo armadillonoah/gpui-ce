@@ -813,6 +813,21 @@ impl Platform for MacPlatform {
 
                     panel.setCanCreateDirectories(true.to_objc());
                     panel.setResolvesAliases_(false.to_objc());
+
+                    // AppKit has no per-row type chooser without an accessory view, so the
+                    // panel admits the union of every requested type's extensions.
+                    let extensions = options
+                        .file_types
+                        .iter()
+                        .flat_map(|file_type| file_type.extensions.iter())
+                        .unique()
+                        .map(|extension| ns_string(extension))
+                        .collect_vec();
+                    if !extensions.is_empty() {
+                        let extensions = NSArray::arrayWithObjects(nil, &extensions);
+                        let _: () = msg_send![panel, setAllowedFileTypes: extensions];
+                    }
+
                     let done_tx = Cell::new(Some(done_tx));
                     let block = ConcreteBlock::new(move |response: NSModalResponse| {
                         let result = if response == NSModalResponse::NSModalResponseOk {
