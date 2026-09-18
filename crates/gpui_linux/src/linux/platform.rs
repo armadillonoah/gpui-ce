@@ -393,6 +393,8 @@ impl<P: LinuxClient + 'static> Platform for LinuxPlatform<P> {
             .with_common(|common| common.callbacks.open_urls = Some(callback));
     }
 
+    /// `options.file_types` is ignored; the XDG portal's filters are not wired up here, so
+    /// the chooser shows every file.
     fn prompt_for_paths(
         &self,
         options: PathPromptOptions,

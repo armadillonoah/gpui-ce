@@ -1357,8 +1357,35 @@ fn file_open_dialog(
         dialog_options |= FOS_PICKFOLDERS;
     }
 
+    // The filter specs borrow these strings, so they have to outlive `Show`.
+    let file_types = options
+        .file_types
+        .iter()
+        .map(|file_type| {
+            let spec = file_type
+                .extensions
+                .iter()
+                .map(|extension| format!("*.{extension}"))
+                .join(";");
+            (HSTRING::from(file_type.name.as_ref()), HSTRING::from(spec))
+        })
+        .collect_vec();
+    let filters = file_types
+        .iter()
+        .map(|(name, spec)| Common::COMDLG_FILTERSPEC {
+            pszName: PCWSTR(name.as_ptr()),
+            pszSpec: PCWSTR(spec.as_ptr()),
+        })
+        .collect_vec();
+
     unsafe {
         folder_dialog.SetOptions(dialog_options)?;
+
+        if !filters.is_empty() {
+            folder_dialog.SetFileTypes(&filters)?;
+            // One-based: the first type is the one the dialog opens on.
+            folder_dialog.SetFileTypeIndex(1)?;
+        }
 
         if let Some(prompt) = options.prompt {
             let prompt: &str = &prompt;
