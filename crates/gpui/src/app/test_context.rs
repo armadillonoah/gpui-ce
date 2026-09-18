@@ -1346,6 +1346,7 @@ mod tests {
                 directories: true,
                 multiple: true,
                 prompt: None,
+                file_types: Vec::new(),
             })
         });
         assert!(cx.did_prompt_for_paths());
@@ -1372,6 +1373,7 @@ mod tests {
                 directories: false,
                 multiple: false,
                 prompt: None,
+                file_types: Vec::new(),
             })
         });
 
