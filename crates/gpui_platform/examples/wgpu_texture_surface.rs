@@ -70,6 +70,7 @@ fn main() {
             optional_features: wgpu::Features::TEXTURE_COMPRESSION_BC
                 | wgpu::Features::TEXTURE_COMPRESSION_BC_SLICED_3D,
             limits: wgpu::Limits::default(),
+            ..WgpuDeviceRequirements::default()
         }));
         cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {

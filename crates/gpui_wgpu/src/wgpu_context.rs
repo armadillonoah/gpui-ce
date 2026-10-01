@@ -39,6 +39,14 @@ pub struct WgpuDeviceRequirements {
     /// `max(gpui_limit, app_limit)` for upper-bound limits and
     /// `min(gpui_limit, app_limit)` for alignment/lower-bound limits.
     pub limits: wgpu::Limits,
+    /// The application's consent to wgpu's experimental features (those whose
+    /// names begin `EXPERIMENTAL_`, such as ray queries). Disabled by default;
+    /// an application that wants one sets it with the `unsafe`
+    /// [`wgpu::ExperimentalFeatures::enabled`] and names the feature in
+    /// [`Self::features`] or [`Self::optional_features`]. Without it an
+    /// optional experimental feature is left out rather than failing device
+    /// creation.
+    pub experimental_features: wgpu::ExperimentalFeatures,
 }
 
 impl WgpuContext {
@@ -202,7 +210,10 @@ impl WgpuContext {
                 required_limits,
                 memory_hints: wgpu::MemoryHints::MemoryUsage,
                 trace: wgpu::Trace::Off,
-                experimental_features: wgpu::ExperimentalFeatures::disabled(),
+                experimental_features: extra_requirements
+                    .map_or_else(wgpu::ExperimentalFeatures::disabled, |reqs| {
+                        reqs.experimental_features
+                    }),
             })
             .await
             .map_err(|e| anyhow::anyhow!("Failed to create wgpu device: {e}"))?;
@@ -498,7 +509,11 @@ fn requested_features(
     let Some(requirements) = requirements else {
         return baseline;
     };
-    baseline | requirements.features | (requirements.optional_features & supported)
+    let mut optional = requirements.optional_features & supported;
+    if !requirements.experimental_features.is_enabled() {
+        optional &= !wgpu::Features::all_experimental_mask();
+    }
+    baseline | requirements.features | optional
 }
 
 #[cfg(not(target_family = "wasm"))]
@@ -530,6 +545,7 @@ mod tests {
             optional_features: wgpu::Features::TEXTURE_COMPRESSION_BC_SLICED_3D
                 | wgpu::Features::TEXTURE_COMPRESSION_ASTC,
             limits: wgpu::Limits::downlevel_defaults(),
+            experimental_features: wgpu::ExperimentalFeatures::disabled(),
         };
         let requested = requested_features(
             baseline,
@@ -541,6 +557,27 @@ mod tests {
         assert!(requested.contains(wgpu::Features::TEXTURE_COMPRESSION_BC));
         assert!(requested.contains(wgpu::Features::TEXTURE_COMPRESSION_BC_SLICED_3D));
         assert!(!requested.contains(wgpu::Features::TEXTURE_COMPRESSION_ASTC));
+    }
+
+    #[test]
+    fn optional_experimental_features_need_the_applications_consent() {
+        let asking = |experimental_features| WgpuDeviceRequirements {
+            optional_features: wgpu::Features::EXPERIMENTAL_RAY_QUERY,
+            experimental_features,
+            ..WgpuDeviceRequirements::default()
+        };
+        let supported = wgpu::Features::EXPERIMENTAL_RAY_QUERY;
+        let without = asking(wgpu::ExperimentalFeatures::disabled());
+        assert!(
+            !requested_features(wgpu::Features::empty(), supported, Some(&without))
+                .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY)
+        );
+        // SAFETY: only builds a feature set; no device is created.
+        let with = asking(unsafe { wgpu::ExperimentalFeatures::enabled() });
+        assert!(
+            requested_features(wgpu::Features::empty(), supported, Some(&with))
+                .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY)
+        );
     }
 
     #[test]
