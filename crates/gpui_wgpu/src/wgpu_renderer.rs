@@ -348,6 +348,8 @@ pub struct WgpuRenderer {
     gamma_offset: u64,
     instance_buffer_capacity: u64,
     max_buffer_size: u64,
+    /// The most one storage binding may cover; a batch larger than this is drawn in chunks.
+    max_storage_binding_size: u64,
     storage_buffer_alignment: u64,
     /// Stride, capacity, and per-frame cursor for alignment-safe
     /// [`SurfaceParams`] ranges in `surface_uniform_buffer`.
@@ -633,6 +635,7 @@ impl WgpuRenderer {
         });
 
         let max_buffer_size = device.limits().max_buffer_size;
+        let max_storage_binding_size = u64::from(device.limits().max_storage_buffer_binding_size);
         let storage_buffer_alignment = device.limits().min_storage_buffer_offset_alignment as u64;
         let initial_instance_buffer_capacity = 2 * 1024 * 1024;
         let instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -694,7 +697,12 @@ impl WgpuRenderer {
         let last_error_clone = Arc::clone(&last_error);
         device.on_uncaptured_error(Arc::new(move |error| {
             let mut guard = last_error_clone.lock().unwrap();
-            *guard = Some(error.to_string());
+            // The first error of a frame is the cause; the ones after it are its
+            // consequences (a bind group that failed to build is "invalid" at every
+            // later use), so the first is the one worth reporting.
+            if guard.is_none() {
+                *guard = Some(error.to_string());
+            }
         }));
 
         let resources = WgpuResources {
@@ -738,6 +746,7 @@ impl WgpuRenderer {
             gamma_offset,
             instance_buffer_capacity: initial_instance_buffer_capacity,
             max_buffer_size,
+            max_storage_binding_size,
             storage_buffer_alignment,
             surface_params_stride,
             surface_params_capacity,
@@ -2514,25 +2523,7 @@ impl WgpuRenderer {
             return true;
         }
 
-        let vertex_data = unsafe { Self::instance_bytes(&vertices) };
-        let Some((vertex_offset, vertex_size)) =
-            self.write_to_instance_buffer(instance_offset, vertex_data)
-        else {
-            return false;
-        };
-
         let resources = self.resources();
-        let data_bind_group = resources
-            .device
-            .create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("path_rasterization_bind_group"),
-                layout: &resources.bind_group_layouts.instances,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: self.instance_binding(vertex_offset, vertex_size),
-                }],
-            });
-
         let Some(path_intermediate_view) = resources.path_intermediate_view.as_ref() else {
             return true;
         };
@@ -2543,14 +2534,47 @@ impl WgpuRenderer {
             (path_intermediate_view, None)
         };
 
-        {
+        // One storage binding may not cover more than the device's limit, and a scene of
+        // fine vectors can carry more path vertices than that in one batch. Such a batch is
+        // drawn in chunks, each its own binding and pass into the one intermediate: the
+        // first pass clears it, the rest draw over what is there. Whole triangles only.
+        let per_vertex = std::mem::size_of::<PathRasterizationVertex>() as u64;
+        let per_chunk = usize::try_from(self.max_storage_binding_size / per_vertex)
+            .unwrap_or(usize::MAX)
+            .saturating_div(3)
+            .max(1)
+            * 3;
+        for (chunk_index, chunk) in vertices.chunks(per_chunk).enumerate() {
+            let vertex_data = unsafe { Self::instance_bytes(chunk) };
+            let Some((vertex_offset, vertex_size)) =
+                self.write_to_instance_buffer(instance_offset, vertex_data)
+            else {
+                return false;
+            };
+
+            let data_bind_group = resources
+                .device
+                .create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("path_rasterization_bind_group"),
+                    layout: &resources.bind_group_layouts.instances,
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: self.instance_binding(vertex_offset, vertex_size),
+                    }],
+                });
+
+            let load = if chunk_index == 0 {
+                wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
+            } else {
+                wgpu::LoadOp::Load
+            };
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("path_rasterization_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: target_view,
                     resolve_target,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        load,
                         store: wgpu::StoreOp::Store,
                     },
                     depth_slice: None,
@@ -2562,7 +2586,7 @@ impl WgpuRenderer {
             pass.set_pipeline(&resources.pipelines.path_rasterization);
             pass.set_bind_group(0, &resources.path_globals_bind_group, &[]);
             pass.set_bind_group(1, &data_bind_group, &[]);
-            pass.draw(0..vertices.len() as u32, 0..1);
+            pass.draw(0..chunk.len() as u32, 0..1);
         }
 
         true
