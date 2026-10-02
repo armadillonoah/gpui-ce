@@ -201,6 +201,11 @@ impl WgpuContext {
             requested_features(required_features, adapter.features(), extra_requirements);
         if let Some(reqs) = extra_requirements {
             required_limits = required_limits.or_better_values_from(&reqs.limits);
+            // wgpu 29.0.4's or_better_values_from omits this limit (fixed on wgpu trunk), so an
+            // application's request for ray-query acceleration structures would be dropped.
+            required_limits.max_acceleration_structures_per_shader_stage = required_limits
+                .max_acceleration_structures_per_shader_stage
+                .max(reqs.limits.max_acceleration_structures_per_shader_stage);
         }
 
         let (device, queue) = adapter
