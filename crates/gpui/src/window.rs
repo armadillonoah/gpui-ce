@@ -1,24 +1,25 @@
 #[cfg(any(feature = "inspector", debug_assertions))]
 use crate::Inspector;
 use crate::{
-    Action, AnyDrag, AnyElement, AnyImageCache, AnyTooltip, AnyView, App, AppContext, Arena, Asset,
-    AsyncWindowContext, AtlasTile, AvailableSpace, BackdropFilter, Background, BorderStyle, Bounds,
-    BoxShadow, Capslock, ColorExt, Context, Corners, CursorHideMode, CursorStyle, Decorations,
-    DevicePixels, DispatchActionListener, DispatchNodeId, DispatchTree, DisplayId, Edges, Effect,
-    Entity, EntityId, EventEmitter, FileDropEvent, Filter, FilterBoundary, FontId, Global,
-    GlobalElementId, GlyphId, GpuSpecs, InputHandler, IsZero, KeyBinding, KeyContext, KeyDownEvent,
-    KeyEvent, Keystroke, KeystrokeEvent, LayoutId, Lerp, LineLayoutIndex, Modifiers,
-    ModifiersChangedEvent, MonochromeSprite, MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent,
-    Path, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler,
-    PlatformWindow, Point, PolychromeSprite, Priority, PromptButton, PromptLevel, Quad, Render,
-    RenderGlyphParams, RenderImage, RenderImageParams, RenderSvgParams, Replay, ResizeEdge,
-    SMOOTH_SVG_SCALE_FACTOR, SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledFilter, ScaledPixels,
-    Scene, Shadow, SharedString, Size, StrikethroughStyle, Style, SubpixelSprite, SubscriberSet,
-    Subscription, SystemWindowTab, SystemWindowTabController, TabStopMap, TaffyLayoutEngine, Task,
-    TextRenderingMode, TextStyle, TextStyleRefinement, ThermalState, TransformationMatrix,
-    Transition, TransitionState, Underline, UnderlineStyle, WindowAppearance,
-    WindowBackgroundAppearance, WindowBounds, WindowControls, WindowDecorations, WindowOptions,
-    WindowParams, WindowTextSystem, point, prelude::*, profiler, px, rems, size, transparent_black,
+    Action, Anchor, AnyDrag, AnyElement, AnyImageCache, AnyTooltip, AnyView, App, AppContext,
+    Arena, Asset, AsyncWindowContext, AtlasTile, AvailableSpace, BackdropFilter, Background,
+    BorderStyle, Bounds, BoxShadow, Capslock, ColorExt, Context, Corners, CursorHideMode,
+    CursorStyle, Decorations, DevicePixels, DispatchActionListener, DispatchNodeId, DispatchTree,
+    DisplayId, Edges, Effect, Entity, EntityId, EventEmitter, FileDropEvent, Filter,
+    FilterBoundary, FontId, Global, GlobalElementId, GlyphId, GpuSpecs, InputHandler, IsZero,
+    KeyBinding, KeyContext, KeyDownEvent, KeyEvent, Keystroke, KeystrokeEvent, LayoutId, Lerp,
+    LineLayoutIndex, Modifiers, ModifiersChangedEvent, MonochromeSprite, MouseButton, MouseEvent,
+    MouseMoveEvent, MouseUpEvent, Path, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput,
+    PlatformInputHandler, PlatformWindow, Point, PolychromeSprite, Priority, PromptButton,
+    PromptLevel, Quad, Render, RenderGlyphParams, RenderImage, RenderImageParams, RenderSvgParams,
+    Replay, ResizeEdge, SMOOTH_SVG_SCALE_FACTOR, SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y,
+    ScaledFilter, ScaledPixels, Scene, Shadow, SharedString, Size, StrikethroughStyle, Style,
+    SubpixelSprite, SubscriberSet, Subscription, SystemWindowTab, SystemWindowTabController,
+    TabStopMap, TaffyLayoutEngine, Task, TextRenderingMode, TextStyle, TextStyleRefinement,
+    ThermalState, TransformationMatrix, Transition, TransitionState, Underline, UnderlineStyle,
+    WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControls, WindowDecorations,
+    WindowOptions, WindowParams, WindowTextSystem, point, prelude::*, profiler, px, rems, size,
+    transparent_black,
 };
 
 use anyhow::{Context as _, Result, anyhow};
@@ -1947,27 +1948,29 @@ impl ContentMask<Pixels> {
 
     /// Intersect the content mask with the given content mask.
     ///
-    /// The intersection of two rounded rectangles is not a rounded rectangle, so the radii are
-    /// the larger of the two per corner, clamped to the result. That errs towards rounding a
-    /// corner that did not strictly need it, which is invisible; the other way round leaves the
-    /// square corner this type exists to remove. In practice one mask is square or the two share
-    /// their bounds, and both of those cases are exact.
+    /// The intersection of two rounded rectangles is not a rounded rectangle. A corner of the
+    /// result keeps a mask's radius only where that mask's own corner IS the result's corner;
+    /// where the result's corner lies inside a mask, that mask's edge is straight there and the
+    /// corner is square. Of two masks sharing the corner, the larger radius wins. So a scroll
+    /// area inside a rounded card is clipped round only where it reaches the card's corners,
+    /// never at its own corners in the middle of the card.
     pub fn intersect(&self, other: &Self) -> Self {
         let bounds = self.bounds.intersect(&other.bounds);
+        let at = |anchor: Anchor| -> Pixels {
+            let own = |mask: &Self| {
+                if mask.bounds.corner(anchor) == bounds.corner(anchor) {
+                    mask.corner_radii.corner(anchor)
+                } else {
+                    Pixels::ZERO
+                }
+            };
+            own(self).max(own(other))
+        };
         let corner_radii = Corners {
-            top_left: self.corner_radii.top_left.max(other.corner_radii.top_left),
-            top_right: self
-                .corner_radii
-                .top_right
-                .max(other.corner_radii.top_right),
-            bottom_right: self
-                .corner_radii
-                .bottom_right
-                .max(other.corner_radii.bottom_right),
-            bottom_left: self
-                .corner_radii
-                .bottom_left
-                .max(other.corner_radii.bottom_left),
+            top_left: at(Anchor::TopLeft),
+            top_right: at(Anchor::TopRight),
+            bottom_right: at(Anchor::BottomRight),
+            bottom_left: at(Anchor::BottomLeft),
         }
         .clamp_radii_for_quad_size(bounds.size);
         ContentMask {
@@ -7516,5 +7519,34 @@ mod tests {
             })
             .unwrap();
         assert_eq!(b_focus_count.get(), 1);
+    }
+}
+
+#[cfg(test)]
+mod content_mask_tests {
+    use crate::{Bounds, ContentMask, Corners, point, px, size};
+
+    fn card() -> ContentMask<crate::Pixels> {
+        ContentMask {
+            bounds: Bounds::new(point(px(0.), px(0.)), size(px(400.), px(300.))),
+            corner_radii: Corners::all(px(18.)),
+        }
+    }
+
+    #[test]
+    fn a_mask_inside_a_rounded_card_is_square_away_from_the_cards_corners() {
+        let inner = ContentMask::new(Bounds::new(point(px(40.), px(0.)), size(px(200.), px(36.))));
+        let clipped = inner.intersect(&card());
+        assert_eq!(clipped.corner_radii, Corners::all(px(0.)));
+    }
+
+    #[test]
+    fn a_mask_sharing_the_cards_corner_keeps_that_corner_round() {
+        let inner = ContentMask::new(Bounds::new(point(px(0.), px(0.)), size(px(200.), px(36.))));
+        let clipped = inner.intersect(&card());
+        assert_eq!(clipped.corner_radii.top_left, px(18.));
+        assert_eq!(clipped.corner_radii.top_right, px(0.));
+        assert_eq!(clipped.corner_radii.bottom_left, px(0.));
+        assert_eq!(clipped.corner_radii.bottom_right, px(0.));
     }
 }
