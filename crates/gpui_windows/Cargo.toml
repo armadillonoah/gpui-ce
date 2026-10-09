@@ -24,6 +24,7 @@ wgpu = [
   "gpui/custom-gpu",
   "gpui_wgpu/custom-gpu",
   "gpui_wgpu/wgpu-surfaces",
+  "gpui_wgpu/static-dxc",
 ]
 
 [dependencies]

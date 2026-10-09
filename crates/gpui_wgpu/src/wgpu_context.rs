@@ -40,6 +40,24 @@ pub(crate) struct NativeInstance {
     pub(crate) raw: wgpu::Instance,
 }
 
+/// The Direct3D 12 shader compiler: DXC, linked in with the `static-dxc` feature. FXC, the
+/// fallback, is slow to compile (seconds per pipeline), stops at shader model 5.1 (so no ray
+/// queries, which need 6.5), and rejects valid WGSL such as dynamic vector-component writes.
+/// Without the static library wgpu looks for `dxcompiler.dll` and falls back to FXC.
+/// `WGPU_DX12_COMPILER` overrides either.
+#[cfg(target_os = "windows")]
+fn dx12_shader_compiler() -> wgpu::Dx12Compiler {
+    if cfg!(all(
+        feature = "static-dxc",
+        target_env = "msvc",
+        not(target_arch = "aarch64")
+    )) {
+        wgpu::Dx12Compiler::StaticDxc
+    } else {
+        wgpu::Dx12Compiler::Auto
+    }
+}
+
 #[cfg(not(target_family = "wasm"))]
 impl NativeBackend {
     #[cfg(target_vendor = "apple")]
@@ -66,6 +84,8 @@ impl NativeBackend {
                 } else {
                     wgpu::Dx12SwapchainKind::DxgiFromVisual
                 };
+                options.dx12.shader_compiler =
+                    wgpu::Dx12Compiler::from_env().unwrap_or_else(dx12_shader_compiler);
                 options
             }
             Self::Vulkan | Self::Gl => wgpu::BackendOptions::default(),

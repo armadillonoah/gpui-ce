@@ -17,6 +17,9 @@ default = []
 test-support = ["gpui/test-support", "dep:image"]
 custom-gpu = ["gpui/custom-gpu"]
 wgpu-surfaces = ["gpui/wgpu-surfaces"]
+# Link Microsoft's DirectX Shader Compiler (built from its open source) into the
+# binary, so Direct3D 12 compiles shaders with DXC rather than the legacy FXC.
+static-dxc = ["wgpu/static-dxc"]
 
 [dependencies]
 gpui = { path = "../gpui", version = "0.2.2", package = "gpui-ce", default-features = false }
