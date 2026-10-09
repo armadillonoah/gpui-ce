@@ -352,10 +352,14 @@ mod custom_gpu_tests {
     const RED: [u8; 4] = [255, 0, 0, 255];
 
     fn renderer() -> anyhow::Result<WgpuRenderer> {
+        renderer_of_size(4, 2)
+    }
+
+    fn renderer_of_size(width: i32, height: i32) -> anyhow::Result<WgpuRenderer> {
         let context = WgpuContext::new_headless(None)?;
         WgpuRenderer::new_headless(
             &context,
-            gpui::size(gpui::DevicePixels(4), gpui::DevicePixels(2)),
+            gpui::size(gpui::DevicePixels(width), gpui::DevicePixels(height)),
         )
     }
 
@@ -427,6 +431,7 @@ mod custom_gpu_tests {
                 bounds: full,
                 ..Default::default()
             },
+            corner_radii: gpui::Corners::default(),
             source: SurfaceSource::Texture {
                 texture,
                 size: gpui::size(gpui::DevicePixels(2), gpui::DevicePixels(2)),
@@ -443,6 +448,46 @@ mod custom_gpu_tests {
         assert_eq!(image.get_pixel(1, 1).0, RED);
         // Outside it: the white backdrop.
         assert_eq!(image.get_pixel(3, 1).0, [255, 255, 255, 255]);
+        Ok(())
+    }
+
+    /// A surface with corner radii leaves its corners to what lies beneath.
+    #[test]
+    fn custom_gpu_textures_clip_to_their_corner_radii() -> anyhow::Result<()> {
+        let mut renderer = renderer_of_size(8, 8)?;
+        let texture = solid_texture(&renderer, RED);
+
+        let full = bounds(8.0, 8.0);
+        let mut scene = Scene::default();
+        scene.insert_primitive(gpui::Quad {
+            bounds: full,
+            content_mask: gpui::ContentMask {
+                bounds: full,
+                ..Default::default()
+            },
+            background: gpui::solid_background(gpui::white()),
+            ..Default::default()
+        });
+        scene.insert_primitive(gpui::PaintSurface {
+            order: 1,
+            bounds: full,
+            content_mask: gpui::ContentMask {
+                bounds: full,
+                ..Default::default()
+            },
+            corner_radii: gpui::Corners::all(ScaledPixels(4.0)),
+            source: SurfaceSource::Texture {
+                texture,
+                size: gpui::size(gpui::DevicePixels(2), gpui::DevicePixels(2)),
+            },
+        });
+        scene.finish();
+
+        let image = renderer.render_to_image(&scene)?;
+
+        assert_eq!(image.get_pixel(4, 4).0, RED);
+        assert_eq!(image.get_pixel(0, 0).0, [255, 255, 255, 255]);
+        assert_eq!(image.get_pixel(7, 7).0, [255, 255, 255, 255]);
         Ok(())
     }
 }
