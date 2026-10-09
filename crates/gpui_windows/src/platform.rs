@@ -1312,8 +1312,33 @@ fn file_open_dialog(
         dialog_options |= FOS_PICKFOLDERS;
     }
 
+    // The filter specs borrow these strings, so they must outlive `Show`.
+    let file_types = options
+        .file_types
+        .iter()
+        .map(|file_type| {
+            (
+                HSTRING::from(file_type.name.as_str()),
+                HSTRING::from(file_type_spec(file_type)),
+            )
+        })
+        .collect::<Vec<_>>();
+    let filters = file_types
+        .iter()
+        .map(|(name, spec)| Common::COMDLG_FILTERSPEC {
+            pszName: PCWSTR(name.as_ptr()),
+            pszSpec: PCWSTR(spec.as_ptr()),
+        })
+        .collect::<Vec<_>>();
+
     unsafe {
         folder_dialog.SetOptions(dialog_options)?;
+
+        if !filters.is_empty() {
+            folder_dialog.SetFileTypes(&filters)?;
+            // One-based: the dialog opens on the first file type.
+            folder_dialog.SetFileTypeIndex(1)?;
+        }
 
         if let Some(prompt) = options.prompt {
             let prompt: &str = &prompt;
@@ -1340,6 +1365,18 @@ fn file_open_dialog(
     }
 
     Ok(Some(paths))
+}
+
+/// The pattern half of a `COMDLG_FILTERSPEC`: `*.step;*.stp`. The shell matches
+/// patterns without regard to case.
+fn file_type_spec(file_type: &PathPromptFileType) -> String {
+    file_type
+        .extensions
+        .iter()
+        .map(|extension| extension.trim_start_matches('.'))
+        .filter(|extension| !extension.is_empty())
+        .map(|extension| format!("*.{extension}"))
+        .join(";")
 }
 
 fn file_save_dialog(
@@ -1561,9 +1598,18 @@ mod tests {
     use std::ffi::{OsStr, OsString};
 
     use crate::{read_from_clipboard, write_to_clipboard};
-    use gpui::ClipboardItem;
+    use gpui::{ClipboardItem, PathPromptFileType};
 
-    use super::encode_restart_arguments;
+    use super::{encode_restart_arguments, file_type_spec};
+
+    #[test]
+    fn test_file_type_spec() {
+        let file_type = PathPromptFileType {
+            name: "STEP files".into(),
+            extensions: vec!["step".into(), ".stp".into(), "".into()],
+        };
+        assert_eq!(file_type_spec(&file_type), "*.step;*.stp");
+    }
 
     #[test]
     fn test_encode_restart_arguments() {

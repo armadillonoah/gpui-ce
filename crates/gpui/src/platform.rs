@@ -3187,8 +3187,22 @@ pub enum TextRenderingMode {
     Grayscale,
 }
 
+/// One entry in a file dialog's type filter: a label and the extensions it admits.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PathPromptFileType {
+    /// The label for this entry, such as `"STEP files"`. Windows and Linux show it in
+    /// the dialog's type chooser; macOS has no chooser and never shows it.
+    pub name: SharedString,
+    /// The extensions this entry admits, without a leading dot, such as `["step", "stp"]`.
+    /// Matching is case-insensitive on every platform.
+    pub extensions: Vec<SharedString>,
+}
+
 /// The options that can be configured for a file dialog prompt
-#[derive(Clone, Debug)]
+///
+/// The default lets nothing be selected, so set `files` or `directories` and spread the
+/// rest: `PathPromptOptions { files: true, ..Default::default() }`.
+#[derive(Clone, Debug, Default)]
 pub struct PathPromptOptions {
     /// Should the prompt allow files to be selected?
     pub files: bool,
@@ -3198,6 +3212,12 @@ pub struct PathPromptOptions {
     pub multiple: bool,
     /// The prompt to show to a user when selecting a path
     pub prompt: Option<SharedString>,
+    /// The file types the dialog lets the user choose from, in the order shown; the first
+    /// entry is selected initially. Leave it empty to show every file.
+    ///
+    /// Windows and Linux show one entry per file type in the dialog's type chooser. macOS
+    /// has no chooser: the panel enables every file whose extension appears in any entry.
+    pub file_types: Vec<PathPromptFileType>,
 }
 
 /// What kind of prompt styling to show
