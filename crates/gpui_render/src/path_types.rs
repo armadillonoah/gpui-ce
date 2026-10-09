@@ -4,7 +4,7 @@
 //! Naga layout checks in `build.rs` enforce that.
 
 use crate::shaders::interface::{BufferData, StorageAbi, storage_abi};
-use gpui::{Background, Bounds, Path, ScaledPixels};
+use gpui::{Background, Bounds, ContentMask, Path, ScaledPixels};
 
 #[derive(Clone, Debug)]
 #[repr(C)]
@@ -18,7 +18,11 @@ pub struct PathRasterizationVertex {
     pub xy_position: gpui::Point<ScaledPixels>,
     pub curve_position: gpui::Point<f32>,
     pub color: Background,
+    /// The path's bounds clipped to its mask; paint is evaluated against these.
     pub bounds: Bounds<ScaledPixels>,
+    /// The mask the path is clipped by, carried whole so its fades and corner radii
+    /// apply to the rasterized coverage exactly as they do to every other primitive.
+    pub content_mask: ContentMask<ScaledPixels>,
 }
 
 unsafe impl BufferData for PathSprite {
@@ -49,6 +53,7 @@ pub fn rasterization_vertices(
                 curve_position: vertex.st_position,
                 color: path.color,
                 bounds,
+                content_mask: path.content_mask,
             })
     })
 }
@@ -103,5 +108,5 @@ pub fn sprite_count(paths: &[Path<ScaledPixels>]) -> usize {
 
 const _: () = {
     assert!(std::mem::size_of::<PathSprite>() == 16);
-    assert!(std::mem::size_of::<PathRasterizationVertex>() == 104);
+    assert!(std::mem::size_of::<PathRasterizationVertex>() == 152);
 };

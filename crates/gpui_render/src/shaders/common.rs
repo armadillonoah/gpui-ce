@@ -138,20 +138,38 @@ mod source {
         pub size: Vec2f,
     }
 
+    /// Mirrors `gpui::ContentMask<ScaledPixels>`, which is uploaded as-is; the field order
+    /// is the shader ABI.
     #[repr(C)]
     #[derive(Clone, Copy, Wgsl)]
     pub struct ContentMask {
         pub bounds: Bounds,
         pub fade_out: Edges,
+        pub corner_radii: Corners,
     }
 
     impl ContentMask {
         /// The mask's coverage at the given window-space position: 1 inside,
-        /// 0 outside, and a linear ramp to 0 across each edge's fade distance.
+        /// 0 outside, a linear ramp to 0 across each edge's fade distance, and an
+        /// antialiased cut along each rounded corner's arc.
+        ///
+        /// The rectangle itself is clipped per vertex by `clip_distances`; this is what
+        /// those four linear distances cannot express. Zero radii, which is almost every
+        /// mask, cost one comparison so nothing clipped by a square parent pays for the
+        /// curve.
         pub fn alpha(content_mask: ContentMask, position: Vec2f) -> f32 {
             let bounds = content_mask.bounds;
             let fade = content_mask.fade_out;
             let mut alpha = 1.0;
+            if !Corners::is_zero(content_mask.corner_radii) {
+                // The same distance field and antialiasing as a quad's outer edge, so a
+                // child's clipped edge lies on its rounded parent's painted corner.
+                alpha *= antialiased_coverage(rounded_rectangle_signed_distance(
+                    position,
+                    bounds,
+                    content_mask.corner_radii,
+                ));
+            }
             if fade.left > 0.0 {
                 alpha *= saturate((position.x - bounds.origin.x) / fade.left);
             }

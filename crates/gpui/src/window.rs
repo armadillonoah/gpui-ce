@@ -2110,9 +2110,15 @@ pub struct DispatchEventResult {
 }
 
 /// Indicates which region of the window is visible. Content falling outside of this mask will not be
-/// rendered. Currently, only rectangular content masks are supported, but we give the mask its own type
-/// to leave room to support more complex shapes in the future. Edge fades are evaluated in
-/// window space against these axis-aligned bounds and are not transform-aware.
+/// rendered. A mask is a rectangle whose corners may be rounded: the radii are zero for almost
+/// every mask, which makes it exactly the rectangle it always was, and non-zero when a rounded
+/// element clips its children (`overflow_hidden` on a `rounded(..)` element) so that a child
+/// painting to the element's inner edge is clipped on the curve rather than at the bounding
+/// rectangle. Edge fades and corner radii are evaluated in window space against these
+/// axis-aligned bounds and are not transform-aware.
+///
+/// The struct is `repr(C)` and uploaded to the GPU as-is, so field order is part of the shader
+/// ABI; see `crates/gpui_render/src/shaders/common.rs`.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 #[repr(C)]
 pub struct ContentMask<P: Clone + Debug + Default + PartialEq> {
@@ -2120,6 +2126,16 @@ pub struct ContentMask<P: Clone + Debug + Default + PartialEq> {
     pub bounds: Bounds<P>,
     /// Edge fade distances. A zero distance leaves that edge fully opaque.
     pub fade_out: Edges<P>,
+    /// Radii the mask's corners are rounded by. All zero for a rectangular mask, which is the
+    /// default; a non-zero radius clips content outside the arc at that corner.
+    pub corner_radii: Corners<P>,
+}
+
+impl<P: Clone + Debug + Default + PartialEq> ContentMask<P> {
+    /// Whether any corner of this mask is rounded.
+    pub fn is_rounded(&self) -> bool {
+        self.corner_radii != Corners::default()
+    }
 }
 
 impl ContentMask<Pixels> {
@@ -2128,6 +2144,7 @@ impl ContentMask<Pixels> {
         ContentMask {
             bounds: self.bounds.scale(factor),
             fade_out: self.fade_out.scale(factor),
+            corner_radii: self.corner_radii.scale(factor),
         }
     }
 
@@ -2135,6 +2152,14 @@ impl ContentMask<Pixels> {
     ///
     /// For each edge, the mask that actually clips at that edge contributes its
     /// fade; when both masks clip at the same coordinate, the stronger fade wins.
+    ///
+    /// The intersection of two rounded rectangles is not a rounded rectangle, so the
+    /// corners are resolved per corner: a corner of the result keeps a mask's radius only
+    /// where that mask's own corner *is* the result's corner. Where the result's corner lies
+    /// inside a mask, that mask's edge is straight there and contributes no rounding. When
+    /// both masks share the corner, the larger radius wins, and the radii are clamped to the
+    /// result's size. So a scroll area inside a rounded card is clipped round only where it
+    /// reaches the card's corners, never at its own corners in the middle of the card.
     pub fn intersect(&self, other: &Self) -> Self {
         fn edge_fade(
             a: Pixels,
@@ -2152,8 +2177,28 @@ impl ContentMask<Pixels> {
             }
         }
 
+        let bounds = self.bounds.intersect(&other.bounds);
+        let radius_at = |anchor: crate::Anchor| -> Pixels {
+            let own = |mask: &Self| {
+                if mask.bounds.corner(anchor) == bounds.corner(anchor) {
+                    mask.corner_radii.corner(anchor)
+                } else {
+                    Pixels::ZERO
+                }
+            };
+            own(self).max(own(other))
+        };
+        let corner_radii = Corners {
+            top_left: radius_at(crate::Anchor::TopLeft),
+            top_right: radius_at(crate::Anchor::TopRight),
+            bottom_right: radius_at(crate::Anchor::BottomRight),
+            bottom_left: radius_at(crate::Anchor::BottomLeft),
+        }
+        .clamp_radii_for_quad_size(bounds.size);
+
         ContentMask {
-            bounds: self.bounds.intersect(&other.bounds),
+            bounds,
+            corner_radii,
             fade_out: Edges {
                 top: edge_fade(
                     self.bounds.top(),
@@ -2199,6 +2244,7 @@ mod content_mask_tests {
                 left: px(fade_left),
                 ..Default::default()
             },
+            ..Default::default()
         }
     }
 
@@ -2210,6 +2256,63 @@ mod content_mask_tests {
 
         let child = mask(0., 40., 0.);
         assert_eq!(outer.intersect(&child).fade_out.left, px(20.));
+    }
+
+    fn card() -> ContentMask<Pixels> {
+        ContentMask {
+            bounds: Bounds::new(point(px(0.), px(0.)), size(px(400.), px(300.))),
+            corner_radii: Corners::all(px(18.)),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn rectangular_masks_intersect_to_a_rectangular_mask() {
+        let outer = mask(0., 100., 0.);
+        let inner = mask(30., 40., 0.);
+        assert_eq!(outer.intersect(&inner).corner_radii, Corners::default());
+        assert!(!outer.intersect(&inner).is_rounded());
+    }
+
+    #[test]
+    fn intersect_is_square_away_from_the_rounded_masks_corners() {
+        let inner = ContentMask {
+            bounds: Bounds::new(point(px(40.), px(0.)), size(px(200.), px(36.))),
+            ..Default::default()
+        };
+        assert_eq!(inner.intersect(&card()).corner_radii, Corners::default());
+        assert_eq!(card().intersect(&inner).corner_radii, Corners::default());
+    }
+
+    #[test]
+    fn intersect_keeps_the_radius_only_at_the_corners_the_masks_share() {
+        let inner = ContentMask {
+            bounds: Bounds::new(point(px(0.), px(0.)), size(px(200.), px(36.))),
+            ..Default::default()
+        };
+        let clipped = inner.intersect(&card());
+        assert_eq!(clipped.corner_radii.top_left, px(18.));
+        assert_eq!(clipped.corner_radii.top_right, px(0.));
+        assert_eq!(clipped.corner_radii.bottom_left, px(0.));
+        assert_eq!(clipped.corner_radii.bottom_right, px(0.));
+    }
+
+    #[test]
+    fn intersect_takes_the_larger_radius_at_a_shared_corner_and_clamps_it() {
+        let inner = ContentMask {
+            bounds: Bounds::new(point(px(0.), px(0.)), size(px(400.), px(20.))),
+            corner_radii: Corners {
+                top_left: px(4.),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let clipped = inner.intersect(&card());
+        // Both masks own the top-left corner; the card's 18px wins but the 20px tall
+        // result can only carry a 10px radius.
+        assert_eq!(clipped.corner_radii.top_left, px(10.));
+        assert_eq!(clipped.corner_radii.top_right, px(10.));
+        assert_eq!(clipped.corner_radii.bottom_left, px(0.));
     }
 }
 
@@ -3074,6 +3177,10 @@ impl Window {
         ContentMask {
             bounds: self.cover_bounds(mask.bounds),
             fade_out: mask.fade_out.scale(self.scale_factor()),
+            // The radii are scaled but not snapped: they describe a curve the shader
+            // antialiases, not an edge, and covering only grows the bounds they were
+            // clamped against.
+            corner_radii: mask.corner_radii.scale(self.scale_factor()),
         }
     }
 
@@ -4679,6 +4786,14 @@ impl Window {
         };
 
         if !quad.background.is_transparent() {
+            self.next_frame.scene.insert_primitive(quad);
+            return;
+        }
+
+        // The strips below are expressed as content masks with their own, much smaller
+        // bounds. Handing them a rounded mask's radii would round each strip's ends and eat
+        // the border's corners, so a quad clipped by a rounded mask is painted whole.
+        if quad.content_mask.is_rounded() {
             self.next_frame.scene.insert_primitive(quad);
             return;
         }

@@ -1016,6 +1016,7 @@ impl DirectXRenderer {
                     curve_position: vertex.st_position,
                     color: path.color,
                     bounds: path.clipped_bounds(),
+                    content_mask: path.content_mask,
                 }));
         }
         debug_assert_eq!(
