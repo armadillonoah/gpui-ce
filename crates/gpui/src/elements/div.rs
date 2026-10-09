@@ -6197,4 +6197,59 @@ mod tests {
         assert_eq!(bounds("cell-1").origin.x, px(100.));
         assert_eq!(bounds("cell-2").origin.x, px(300.));
     }
+
+    /// The whole chain, end to end: a rounded element that clips its children hands them
+    /// its curve, asserted on the child's quad in the finished scene, which is what the
+    /// GPU reads.
+    #[gpui::test]
+    fn a_child_of_a_rounded_clipping_parent_is_masked_by_the_parents_curve(
+        cx: &mut TestAppContext,
+    ) {
+        let window = cx.add_empty_window();
+        window.draw(point(px(0.), px(0.)), size(px(200.), px(200.)), |_, _| {
+            div()
+                .size_full()
+                .rounded(px(10.))
+                .overflow_hidden()
+                .child(div().size_full().bg(crate::red()))
+                .into_any_element()
+        });
+
+        let (radii, expected) = window.update(|window, _| {
+            (
+                window
+                    .rendered_frame
+                    .scene
+                    .quads
+                    .last()
+                    .map(|quad| quad.content_mask.corner_radii),
+                px(10.).scale(window.scale_factor()),
+            )
+        });
+        assert_eq!(radii, Some(crate::Corners::all(expected)));
+    }
+
+    /// A square clipping parent still gives a square mask, so the common case keeps the
+    /// shader's fast path and renders exactly as before.
+    #[gpui::test]
+    fn a_child_of_a_square_clipping_parent_keeps_a_square_mask(cx: &mut TestAppContext) {
+        let window = cx.add_empty_window();
+        window.draw(point(px(0.), px(0.)), size(px(200.), px(200.)), |_, _| {
+            div()
+                .size_full()
+                .overflow_hidden()
+                .child(div().size_full().bg(crate::red()))
+                .into_any_element()
+        });
+
+        let radii = window.update(|window, _| {
+            window
+                .rendered_frame
+                .scene
+                .quads
+                .last()
+                .map(|quad| quad.content_mask.corner_radii)
+        });
+        assert_eq!(radii, Some(crate::Corners::default()));
+    }
 }

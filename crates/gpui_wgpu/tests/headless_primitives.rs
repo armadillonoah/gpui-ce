@@ -555,6 +555,7 @@ fn content_mask_fades_quad_edges() {
                 bottom: ScaledPixels(0.0),
                 left: ScaledPixels(20.0),
             },
+            ..Default::default()
         },
         background: solid_background(red),
         ..Default::default()
@@ -581,4 +582,46 @@ fn content_mask_fades_quad_edges() {
     close(60, 2, 64);
     // The unfaded right edge still clips hard at the mask boundary.
     assert_eq!(pixel(101, 50)[0], 0);
+}
+
+#[test]
+fn content_mask_clips_to_rounded_corners() {
+    let mut renderer = WgpuHeadlessRenderer::new().expect("headless renderer");
+    let mut scene = Scene::default();
+    let red: Hsla = gpui::rgb_to_hsla(gpui::rgb(0xff0000));
+    // A square child painted edge to edge inside a rounded clipping parent.
+    scene.insert_primitive(Quad {
+        order: 0,
+        bounds: bounds(0.0, 0.0, 100.0, 100.0),
+        content_mask: ContentMask {
+            bounds: bounds(0.0, 0.0, 100.0, 100.0),
+            corner_radii: Corners {
+                top_left: ScaledPixels(20.0),
+                top_right: ScaledPixels(0.0),
+                bottom_right: ScaledPixels(0.0),
+                bottom_left: ScaledPixels(0.0),
+            },
+            ..Default::default()
+        },
+        background: solid_background(red),
+        ..Default::default()
+    });
+    scene.finish();
+    let image = renderer
+        .render_scene_to_image(&scene, TARGET)
+        .expect("render must succeed");
+    let pixel = |x: u32, y: u32| image.get_pixel(x, y).0;
+
+    // Outside the arc at the rounded corner nothing is painted.
+    assert_eq!(pixel(0, 0), [0, 0, 0, 255]);
+    assert_eq!(pixel(3, 3), [0, 0, 0, 255]);
+    // Inside the arc, along the edges and at the square corners it paints in full.
+    assert_eq!(pixel(20, 20)[0], 255);
+    assert_eq!(pixel(0, 50)[0], 255);
+    assert_eq!(pixel(50, 0)[0], 255);
+    assert_eq!(pixel(99, 0)[0], 255);
+    assert_eq!(pixel(0, 99)[0], 255);
+    assert_eq!(pixel(99, 99)[0], 255);
+    // The bounds still clip hard where the mask ends.
+    assert_eq!(pixel(100, 50)[0], 0);
 }

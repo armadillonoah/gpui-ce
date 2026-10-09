@@ -34,6 +34,13 @@ pub const SCENE_BUFFER_LAYOUTS: &[SceneBufferLayout] = &[
         bottom_left
     ),
     layout!(Edges<ScaledPixels>, "Edges", top, right, bottom, left),
+    layout!(
+        ContentMask<ScaledPixels>,
+        "ContentMask",
+        bounds,
+        fade_out,
+        corner_radii
+    ),
     layout!(SceneHsla, "Hsla", h, s, l, a),
     layout!(LinearColorStop, "LinearColorStop", color, percentage),
     layout!(
@@ -136,9 +143,10 @@ const _: () = {
     assert!(std::mem::size_of::<ShaderBool>() == 4);
     assert!(std::mem::size_of::<BorderStyle>() == 4);
     assert!(std::mem::size_of::<crate::AtlasTextureKind>() == 4);
-    assert!(std::mem::size_of::<ContentMask<ScaledPixels>>() == 32);
+    assert!(std::mem::size_of::<ContentMask<ScaledPixels>>() == 48);
     assert!(std::mem::offset_of!(ContentMask<ScaledPixels>, bounds) == 0);
     assert!(std::mem::offset_of!(ContentMask<ScaledPixels>, fade_out) == 16);
+    assert!(std::mem::offset_of!(ContentMask<ScaledPixels>, corner_radii) == 32);
     assert!(std::mem::size_of::<Point<ScaledPixels>>() == 8);
     assert!(std::mem::offset_of!(Point<ScaledPixels>, x) == 0);
     assert!(std::mem::offset_of!(Point<ScaledPixels>, y) == 4);

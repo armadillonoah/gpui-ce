@@ -906,15 +906,17 @@ impl Style {
             _ => {
                 let mut min = bounds.origin;
                 let mut max = bounds.bottom_right();
+                let mut inset = Edges::<Pixels>::default();
 
                 if self
                     .border_color
                     .is_some_and(|background| !background.is_transparent())
                 {
-                    min.x += self.border_widths.left.to_pixels(rem_size);
-                    max.x -= self.border_widths.right.to_pixels(rem_size);
-                    min.y += self.border_widths.top.to_pixels(rem_size);
-                    max.y -= self.border_widths.bottom.to_pixels(rem_size);
+                    inset = self.border_widths.to_pixels(rem_size);
+                    min.x += inset.left;
+                    max.x -= inset.right;
+                    min.y += inset.top;
+                    max.y -= inset.bottom;
                 }
 
                 let bounds = match (
@@ -947,7 +949,34 @@ impl Style {
                     fade_out.bottom = Pixels::ZERO;
                 }
 
-                Some(ContentMask { bounds, fade_out })
+                // A rounded element clips its children on its own curve. The radius the
+                // children see is the inner one -- the element's radius less the border
+                // between them -- so the two arcs are concentric and no ground shows in the
+                // gap. Zero radii keep the mask the plain rectangle it always was.
+                let inner_radius = |radius: AbsoluteLength, first: Pixels, second: Pixels| {
+                    (radius.to_pixels(rem_size) - first.max(second)).max(Pixels::ZERO)
+                };
+                let corner_radii = Corners {
+                    top_left: inner_radius(self.corner_radii.top_left, inset.top, inset.left),
+                    top_right: inner_radius(self.corner_radii.top_right, inset.top, inset.right),
+                    bottom_right: inner_radius(
+                        self.corner_radii.bottom_right,
+                        inset.bottom,
+                        inset.right,
+                    ),
+                    bottom_left: inner_radius(
+                        self.corner_radii.bottom_left,
+                        inset.bottom,
+                        inset.left,
+                    ),
+                }
+                .clamp_radii_for_quad_size(bounds.size);
+
+                Some(ContentMask {
+                    bounds,
+                    fade_out,
+                    corner_radii,
+                })
             }
         }
     }
@@ -966,6 +995,7 @@ impl Style {
             border_color: self.border_color,
             border_widths: self.border_widths,
             overflow_fade: self.overflow_fade,
+            corner_radii: self.corner_radii,
             ..Style::default()
         };
         scroll_style
@@ -2059,5 +2089,85 @@ mod tests {
         assert_eq!(inset.color, gradient);
         assert!(inset.inset);
         assert_eq!(style.ring, RingStyle::default());
+    }
+
+    fn all_corners(radius: Pixels) -> Corners<AbsoluteLength> {
+        Corners {
+            top_left: AbsoluteLength::Pixels(radius),
+            top_right: AbsoluteLength::Pixels(radius),
+            bottom_right: AbsoluteLength::Pixels(radius),
+            bottom_left: AbsoluteLength::Pixels(radius),
+        }
+    }
+
+    fn clipping_style(radius: Pixels) -> Style {
+        let mut style = Style::default();
+        style.overflow.x = Overflow::Hidden;
+        style.overflow.y = Overflow::Hidden;
+        style.corner_radii = all_corners(radius);
+        style
+    }
+
+    fn clip_bounds() -> Bounds<Pixels> {
+        Bounds {
+            origin: point(px(0.), px(0.)),
+            size: size(px(200.), px(120.)),
+        }
+    }
+
+    #[test]
+    fn overflow_mask_carries_the_inner_radius_inside_a_border() {
+        let mut style = clipping_style(px(10.));
+        style.border_widths = Edges::all(AbsoluteLength::Pixels(px(1.)));
+        style.border_color = Some(crate::black().into());
+
+        let mask = style
+            .overflow_mask(clip_bounds(), px(16.))
+            .expect("hidden overflow makes a mask");
+
+        assert_eq!(mask.corner_radii, Corners::all(px(9.)));
+        // The bounds are inset by the border the same way, so the two arcs are concentric.
+        assert_eq!(mask.bounds.size.width, px(198.));
+    }
+
+    #[test]
+    fn overflow_mask_passes_a_borderless_radius_through_unchanged() {
+        let mut style = clipping_style(px(12.));
+        style.overflow.x = Overflow::Visible;
+
+        let mask = style
+            .overflow_mask(clip_bounds(), px(16.))
+            .expect("hidden overflow makes a mask");
+
+        assert_eq!(mask.corner_radii, Corners::all(px(12.)));
+    }
+
+    #[test]
+    fn overflow_mask_of_a_square_element_stays_square() {
+        let mask = clipping_style(px(0.))
+            .overflow_mask(clip_bounds(), px(16.))
+            .expect("hidden overflow makes a mask");
+
+        assert_eq!(mask.corner_radii, Corners::default());
+        assert!(!mask.is_rounded());
+    }
+
+    #[test]
+    fn overflow_mask_clamps_a_radius_larger_than_the_element() {
+        let mask = clipping_style(px(500.))
+            .overflow_mask(clip_bounds(), px(16.))
+            .expect("hidden overflow makes a mask");
+
+        assert_eq!(mask.corner_radii, Corners::all(px(60.)));
+    }
+
+    #[test]
+    fn scroll_mask_carries_the_elements_radius() {
+        let mut style = Style::default();
+        style.corner_radii = all_corners(px(8.));
+
+        let mask = style.scroll_mask(clip_bounds(), px(16.));
+
+        assert_eq!(mask.corner_radii, Corners::all(px(8.)));
     }
 }
