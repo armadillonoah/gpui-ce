@@ -906,15 +906,17 @@ impl Style {
             _ => {
                 let mut min = bounds.origin;
                 let mut max = bounds.bottom_right();
+                let mut inset = Edges::default();
 
                 if self
                     .border_color
                     .is_some_and(|background| !background.is_transparent())
                 {
-                    min.x += self.border_widths.left.to_pixels(rem_size);
-                    max.x -= self.border_widths.right.to_pixels(rem_size);
-                    min.y += self.border_widths.top.to_pixels(rem_size);
-                    max.y -= self.border_widths.bottom.to_pixels(rem_size);
+                    inset = self.border_widths.to_pixels(rem_size);
+                    min.x += inset.left;
+                    max.x -= inset.right;
+                    min.y += inset.top;
+                    max.y -= inset.bottom;
                 }
 
                 let bounds = match (
@@ -947,9 +949,34 @@ impl Style {
                     fade_out.bottom = Pixels::ZERO;
                 }
 
-                Some(ContentMask { bounds, fade_out })
+                let corner_radii = self.inner_corner_radii(inset, bounds.size, rem_size);
+                Some(ContentMask {
+                    bounds,
+                    fade_out,
+                    corner_radii,
+                })
             }
         }
+    }
+
+    /// The radii a rounded element clips its children by: its own radii less the border
+    /// between them, so the two curves are concentric, and clamped to the clipped size.
+    fn inner_corner_radii(
+        &self,
+        inset: Edges<Pixels>,
+        size: Size<Pixels>,
+        rem_size: Pixels,
+    ) -> Corners<Pixels> {
+        let radius = |radius: AbsoluteLength, first: Pixels, second: Pixels| {
+            (radius.to_pixels(rem_size) - first.max(second)).max(Pixels::ZERO)
+        };
+        Corners {
+            top_left: radius(self.corner_radii.top_left, inset.top, inset.left),
+            top_right: radius(self.corner_radii.top_right, inset.top, inset.right),
+            bottom_right: radius(self.corner_radii.bottom_right, inset.bottom, inset.right),
+            bottom_left: radius(self.corner_radii.bottom_left, inset.bottom, inset.left),
+        }
+        .clamp_radii_for_quad_size(size)
     }
 
     /// Get the content mask for a container that always clips and scrolls
@@ -1707,6 +1734,59 @@ impl From<Position> for taffy::style::Position {
             Position::Relative => Self::Relative,
             Position::Absolute => Self::Absolute,
         }
+    }
+}
+
+#[cfg(test)]
+mod rounded_mask_tests {
+    use super::*;
+    use crate::{point, px, size};
+
+    fn clipping(radius: f32) -> Style {
+        let mut style = Style::default();
+        style.overflow.x = Overflow::Hidden;
+        style.overflow.y = Overflow::Hidden;
+        let radius = AbsoluteLength::Pixels(px(radius));
+        style.corner_radii = Corners {
+            top_left: radius,
+            top_right: radius,
+            bottom_right: radius,
+            bottom_left: radius,
+        };
+        style
+    }
+
+    fn panel() -> Bounds<Pixels> {
+        Bounds::new(point(px(0.), px(0.)), size(px(200.), px(120.)))
+    }
+
+    #[test]
+    fn a_rounded_clipping_element_gives_its_children_its_inner_curve() {
+        let mut style = clipping(10.);
+        style.border_widths = Edges::all(AbsoluteLength::Pixels(px(1.)));
+        style.border_color = Some(crate::black().into());
+
+        let mask = style
+            .overflow_mask(panel(), px(16.))
+            .expect("a hidden overflow makes a mask");
+        assert_eq!(mask.corner_radii, Corners::all(px(9.)));
+        assert_eq!(mask.bounds.size.width, px(198.));
+    }
+
+    #[test]
+    fn a_square_clipping_element_still_makes_a_square_mask() {
+        let mask = clipping(0.)
+            .overflow_mask(panel(), px(16.))
+            .expect("a mask");
+        assert_eq!(mask.corner_radii, Corners::default());
+    }
+
+    #[test]
+    fn a_radius_larger_than_the_element_is_clamped_to_it() {
+        let mask = clipping(500.)
+            .overflow_mask(panel(), px(16.))
+            .expect("a mask");
+        assert_eq!(mask.corner_radii, Corners::all(px(60.)));
     }
 }
 

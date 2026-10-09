@@ -608,6 +608,7 @@ fn content_mask_fades_quad_edges() {
                 bottom: ScaledPixels(0.0),
                 left: ScaledPixels(20.0),
             },
+            corner_radii: Default::default(),
         },
         background: solid_background(red),
         ..Default::default()
