@@ -464,12 +464,27 @@ fn create_render_target_texture(
 #[derive(Clone, Debug, Default)]
 pub struct WgpuDeviceRequirements {
     /// Additional [`wgpu::Features`] to enable.  These are OR-ed with gpui's
-    /// own required features.
+    /// own required features.  Device creation fails when the selected
+    /// adapter does not support one of them.
     pub features: wgpu::Features,
+    /// Additional [`wgpu::Features`] to enable when the selected adapter
+    /// supports them.  Unsupported optional features are left out rather than
+    /// failing device creation.  Optional features whose names begin
+    /// `EXPERIMENTAL_` are also left out unless [`Self::experimental_features`]
+    /// consents to them.
+    pub optional_features: wgpu::Features,
     /// Additional [`wgpu::Limits`] to request.  Each field is merged by taking
     /// `max(gpui_limit, app_limit)` for upper-bound limits and
-    /// `min(gpui_limit, app_limit)` for alignment/lower-bound limits.
+    /// `min(gpui_limit, app_limit)` for alignment/lower-bound limits.  A
+    /// requested value the selected adapter cannot supply fails device creation
+    /// with an error naming the limit; it is never silently clamped.
     pub limits: Option<wgpu::Limits>,
+    /// The application's consent to wgpu's experimental features (those whose
+    /// names begin `EXPERIMENTAL_`, such as ray queries).  Disabled by
+    /// default.  An application that wants one sets this with the `unsafe`
+    /// [`wgpu::ExperimentalFeatures::enabled`] and names the feature in
+    /// [`Self::features`] or [`Self::optional_features`].
+    pub experimental_features: wgpu::ExperimentalFeatures,
 }
 
 impl WgpuContext {
@@ -670,11 +685,14 @@ impl WgpuContext {
             .using_alignment(adapter.limits());
 
         // Merge application-requested requirements.
+        let required_features =
+            requested_features(required_features, adapter.features(), extra_requirements);
+        let mut experimental_features = wgpu::ExperimentalFeatures::disabled();
         if let Some(reqs) = extra_requirements {
-            required_features |= reqs.features;
             if let Some(limits) = &reqs.limits {
-                required_limits = required_limits.or_better_values_from(limits);
+                required_limits = requested_limits(required_limits, limits, &adapter.limits())?;
             }
+            experimental_features = reqs.experimental_features;
         }
 
         let (device, queue) = adapter
@@ -684,7 +702,7 @@ impl WgpuContext {
                 required_limits,
                 memory_hints: wgpu::MemoryHints::MemoryUsage,
                 trace: wgpu::Trace::Off,
-                experimental_features: wgpu::ExperimentalFeatures::disabled(),
+                experimental_features,
             })
             .await
             .map_err(|e| anyhow::anyhow!("Failed to create wgpu device: {e}"))?;
@@ -1009,6 +1027,76 @@ fn install_device_callbacks(
     (device_lost, uncaptured_error)
 }
 
+/// The features to create the device with: gpui's `baseline`, every feature
+/// the application requires, and those of its optional features the adapter
+/// `supported`.  Optional experimental features are left out unless the
+/// application consented to them.
+fn requested_features(
+    baseline: wgpu::Features,
+    supported: wgpu::Features,
+    requirements: Option<&WgpuDeviceRequirements>,
+) -> wgpu::Features {
+    let Some(requirements) = requirements else {
+        return baseline;
+    };
+    let mut optional = requirements.optional_features & supported;
+    if !requirements.experimental_features.is_enabled() {
+        optional &= !wgpu::Features::all_experimental_mask();
+    }
+    baseline | requirements.features | optional
+}
+
+/// The limits to create the device with: gpui's `baseline` raised to whatever
+/// the application `requested`, checked against what the `adapter` offers.
+///
+/// A requested value the adapter cannot supply is an error naming the limit,
+/// never a silent clamp.  The acceleration-structure limits are merged by
+/// hand: wgpu 29's [`wgpu::Limits::or_better_values_from`] and
+/// [`wgpu::Limits::check_limits`] omit `max_acceleration_structures_per_shader_stage`,
+/// so a ray-query request would otherwise reach the device as zero without
+/// any error.
+fn requested_limits(
+    baseline: wgpu::Limits,
+    requested: &wgpu::Limits,
+    adapter: &wgpu::Limits,
+) -> anyhow::Result<wgpu::Limits> {
+    let mut exceeded = Vec::new();
+    requested.check_limits_with_fail_fn(adapter, false, |name, requested, supported| {
+        exceeded.push(format!(
+            "{name} ({requested} requested, {supported} supported)"
+        ));
+    });
+    // wgpu 29 lists `max_texture_dimension_1d` twice, so a failure there is reported twice.
+    exceeded.dedup();
+    let structures_per_stage = requested.max_acceleration_structures_per_shader_stage;
+    if structures_per_stage > adapter.max_acceleration_structures_per_shader_stage {
+        exceeded.push(format!(
+            "max_acceleration_structures_per_shader_stage ({structures_per_stage} requested, {} supported)",
+            adapter.max_acceleration_structures_per_shader_stage
+        ));
+    }
+    anyhow::ensure!(
+        exceeded.is_empty(),
+        "requested GPU limits exceed what the adapter supports: {}",
+        exceeded.join(", ")
+    );
+
+    let mut limits = baseline.or_better_values_from(requested);
+    limits.max_acceleration_structures_per_shader_stage = limits
+        .max_acceleration_structures_per_shader_stage
+        .max(structures_per_stage);
+    limits.max_blas_geometry_count = limits
+        .max_blas_geometry_count
+        .max(requested.max_blas_geometry_count);
+    limits.max_blas_primitive_count = limits
+        .max_blas_primitive_count
+        .max(requested.max_blas_primitive_count);
+    limits.max_tlas_instance_count = limits
+        .max_tlas_instance_count
+        .max(requested.max_tlas_instance_count);
+    Ok(limits)
+}
+
 #[cfg(not(target_family = "wasm"))]
 fn parse_pci_id(id: &str) -> anyhow::Result<u32> {
     let mut id = id.trim();
@@ -1028,7 +1116,160 @@ fn parse_pci_id(id: &str) -> anyhow::Result<u32> {
 
 #[cfg(all(test, not(target_family = "wasm")))]
 mod tests {
-    use super::{NativeBackend, SoftwareAdapterPolicy, parse_pci_id};
+    use super::{
+        NativeBackend, SoftwareAdapterPolicy, WgpuDeviceRequirements, parse_pci_id,
+        requested_features, requested_limits,
+    };
+
+    #[test]
+    fn optional_device_features_are_limited_to_adapter_support() {
+        let baseline = wgpu::Features::DUAL_SOURCE_BLENDING;
+        let requirements = WgpuDeviceRequirements {
+            features: wgpu::Features::TEXTURE_COMPRESSION_BC,
+            optional_features: wgpu::Features::TEXTURE_COMPRESSION_BC_SLICED_3D
+                | wgpu::Features::TEXTURE_COMPRESSION_ASTC,
+            ..WgpuDeviceRequirements::default()
+        };
+        let requested = requested_features(
+            baseline,
+            wgpu::Features::TEXTURE_COMPRESSION_BC_SLICED_3D,
+            Some(&requirements),
+        );
+
+        assert!(requested.contains(baseline));
+        assert!(requested.contains(wgpu::Features::TEXTURE_COMPRESSION_BC));
+        assert!(requested.contains(wgpu::Features::TEXTURE_COMPRESSION_BC_SLICED_3D));
+        assert!(!requested.contains(wgpu::Features::TEXTURE_COMPRESSION_ASTC));
+        assert_eq!(
+            requested_features(baseline, wgpu::Features::all(), None),
+            baseline,
+            "no requirements must leave gpui's own features untouched"
+        );
+    }
+
+    #[test]
+    fn optional_experimental_features_need_the_applications_consent() {
+        let asking = |experimental_features| WgpuDeviceRequirements {
+            optional_features: wgpu::Features::EXPERIMENTAL_RAY_QUERY,
+            experimental_features,
+            ..WgpuDeviceRequirements::default()
+        };
+        let supported = wgpu::Features::EXPERIMENTAL_RAY_QUERY;
+        let without = asking(wgpu::ExperimentalFeatures::disabled());
+        assert!(
+            !requested_features(wgpu::Features::empty(), supported, Some(&without))
+                .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY)
+        );
+        // SAFETY: only builds a feature set; no device is created.
+        let with = asking(unsafe { wgpu::ExperimentalFeatures::enabled() });
+        assert!(
+            requested_features(wgpu::Features::empty(), supported, Some(&with))
+                .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY)
+        );
+    }
+
+    #[test]
+    fn requested_limits_raise_the_baseline_without_lowering_it() {
+        let baseline = wgpu::Limits::downlevel_defaults();
+        let adapter = wgpu::Limits {
+            max_texture_array_layers: 2048,
+            max_buffer_size: 1 << 31,
+            max_acceleration_structures_per_shader_stage: 16,
+            max_blas_geometry_count: 1 << 24,
+            max_blas_primitive_count: 1 << 28,
+            max_tlas_instance_count: 1 << 24,
+            ..wgpu::Limits::default()
+        };
+        let requested = wgpu::Limits {
+            max_texture_array_layers: 1024,
+            max_buffer_size: 1 << 30,
+            // Below the baseline: the baseline wins.
+            max_bind_groups: 1,
+            max_acceleration_structures_per_shader_stage: 8,
+            max_blas_geometry_count: 1 << 20,
+            max_blas_primitive_count: 1 << 26,
+            max_tlas_instance_count: 1 << 20,
+            ..wgpu::Limits::downlevel_webgl2_defaults()
+        };
+
+        let limits = requested_limits(baseline.clone(), &requested, &adapter)
+            .expect("every requested limit is within the adapter");
+        assert_eq!(limits.max_texture_array_layers, 1024);
+        assert_eq!(limits.max_buffer_size, 1 << 30);
+        assert_eq!(limits.max_bind_groups, baseline.max_bind_groups);
+        assert_eq!(limits.max_acceleration_structures_per_shader_stage, 8);
+        assert_eq!(limits.max_blas_geometry_count, 1 << 20);
+        assert_eq!(limits.max_blas_primitive_count, 1 << 26);
+        assert_eq!(limits.max_tlas_instance_count, 1 << 20);
+    }
+
+    #[test]
+    fn requested_limits_beyond_the_adapter_name_the_limit() {
+        let adapter = wgpu::Limits {
+            max_texture_array_layers: 256,
+            max_acceleration_structures_per_shader_stage: 0,
+            ..wgpu::Limits::downlevel_defaults()
+        };
+        let requested = wgpu::Limits {
+            max_texture_array_layers: 512,
+            max_acceleration_structures_per_shader_stage: 1,
+            ..wgpu::Limits::downlevel_defaults()
+        };
+
+        let error = requested_limits(wgpu::Limits::downlevel_defaults(), &requested, &adapter)
+            .expect_err("a limit the adapter cannot supply must fail");
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("max_texture_array_layers (512 requested, 256 supported)"),
+            "{message}"
+        );
+        assert!(
+            message.contains(
+                "max_acceleration_structures_per_shader_stage (1 requested, 0 supported)"
+            ),
+            "{message}"
+        );
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn headless_device_honours_a_raised_limit() -> anyhow::Result<()> {
+        use super::WgpuContext;
+
+        let probe = WgpuContext::new_headless(None)?;
+        let supported = probe.adapter.limits().max_texture_array_layers;
+        assert_eq!(
+            probe.device.limits().max_texture_array_layers,
+            wgpu::Limits::downlevel_defaults().max_texture_array_layers,
+            "without requirements the device keeps gpui's baseline"
+        );
+
+        let raised = WgpuDeviceRequirements {
+            limits: Some(wgpu::Limits {
+                max_texture_array_layers: supported,
+                ..wgpu::Limits::downlevel_defaults()
+            }),
+            ..WgpuDeviceRequirements::default()
+        };
+        let context = WgpuContext::new_headless(Some(&raised))?;
+        assert_eq!(context.device.limits().max_texture_array_layers, supported);
+
+        let beyond = WgpuDeviceRequirements {
+            limits: Some(wgpu::Limits {
+                max_texture_array_layers: supported + 1,
+                ..wgpu::Limits::downlevel_defaults()
+            }),
+            ..WgpuDeviceRequirements::default()
+        };
+        let error = WgpuContext::new_headless(Some(&beyond))
+            .err()
+            .ok_or_else(|| anyhow::anyhow!("a limit beyond the adapter must fail"))?;
+        assert!(
+            format!("{error:#}").contains("max_texture_array_layers"),
+            "{error:#}"
+        );
+        Ok(())
+    }
 
     #[test]
     fn native_backend_fallbacks_are_individually_initialized() {
