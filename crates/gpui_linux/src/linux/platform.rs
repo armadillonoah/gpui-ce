@@ -25,8 +25,8 @@ use xkbcommon::xkb::{self, Keycode, Keysym, State};
 use crate::linux::{LinuxDispatcher, PriorityQueueCalloopReceiver};
 use gpui::{
     Action, AnyWindowHandle, BackgroundExecutor, ClipboardItem, CursorStyle, DisplayId,
-    ForegroundExecutor, Keymap, Menu, MenuItem, OwnedMenu, PathPromptOptions, Platform,
-    PlatformDisplay, PlatformKeyboardLayout, PlatformKeyboardMapper, PlatformTextSystem,
+    ForegroundExecutor, Keymap, Menu, MenuItem, OwnedMenu, PathPromptFileType, PathPromptOptions,
+    Platform, PlatformDisplay, PlatformKeyboardLayout, PlatformKeyboardMapper, PlatformTextSystem,
     PlatformWindow, Result, RunnableVariant, SharedString, Task, ThermalState, WindowAppearance,
     WindowButtonLayout, WindowParams,
 };
@@ -222,6 +222,40 @@ async fn listen_for_system_wake(wake_sender: Sender<()>) -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// The portal filter for one file type: its label and one glob per extension.
+#[cfg(any(feature = "wayland", feature = "x11"))]
+fn file_filter(file_type: &PathPromptFileType) -> ashpd::desktop::file_chooser::FileFilter {
+    file_type
+        .extensions
+        .iter()
+        .map(|extension| extension.trim_start_matches('.'))
+        .filter(|extension| !extension.is_empty())
+        .fold(
+            ashpd::desktop::file_chooser::FileFilter::new(file_type.name.as_str()),
+            |filter, extension| filter.glob(&extension_glob(extension)),
+        )
+}
+
+/// A glob that matches an extension in any case: portal globs are case-sensitive, and
+/// `MODEL.STEP` is as much a STEP file as `model.step`.
+#[cfg(any(feature = "wayland", feature = "x11"))]
+fn extension_glob(extension: &str) -> String {
+    let mut glob = String::from("*.");
+    for character in extension.chars() {
+        let lower = character.to_lowercase().to_string();
+        let upper = character.to_uppercase().to_string();
+        if lower == upper {
+            glob.push(character);
+        } else {
+            glob.push('[');
+            glob.push_str(&lower);
+            glob.push_str(&upper);
+            glob.push(']');
+        }
+    }
+    glob
 }
 
 pub(crate) struct LinuxPlatform<P> {
@@ -421,6 +455,7 @@ impl<P: LinuxClient + 'static> Platform for LinuxPlatform<P> {
                     .accept_label(options.prompt.as_ref().map(gpui::SharedString::as_str))
                     .multiple(options.multiple)
                     .directory(options.directories)
+                    .filters(options.file_types.iter().map(file_filter))
                     .send()
                     .await
                 {
@@ -1281,6 +1316,28 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "libxkbcommon failed to create an XKB context"
+        );
+    }
+
+    #[cfg(any(feature = "wayland", feature = "x11"))]
+    #[test]
+    fn extension_globs_match_either_case() {
+        assert_eq!(extension_glob("step"), "*.[sS][tT][eE][pP]");
+        assert_eq!(extension_glob("3mf"), "*.3[mM][fF]");
+        assert_eq!(extension_glob("tar.gz"), "*.[tT][aA][rR].[gG][zZ]");
+    }
+
+    #[cfg(any(feature = "wayland", feature = "x11"))]
+    #[test]
+    fn file_filter_carries_the_label_and_one_glob_per_extension() {
+        let filter = file_filter(&PathPromptFileType {
+            name: "STEP files".into(),
+            extensions: vec!["step".into(), ".stp".into(), "".into()],
+        });
+        assert_eq!(filter.label(), "STEP files");
+        assert_eq!(
+            filter.pattern_filters(),
+            ["*.[sS][tT][eE][pP]", "*.[sS][tT][pP]"]
         );
     }
 

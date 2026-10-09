@@ -1189,8 +1189,8 @@ impl AnyWindowHandle {
 #[cfg(test)]
 mod tests {
     use crate::{
-        PathPromptOptions, SystemNotification, SystemNotificationAction,
-        SystemNotificationResponse, TestAppContext,
+        PathPromptFileType, PathPromptOptions, SharedString, SystemNotification,
+        SystemNotificationAction, SystemNotificationResponse, TestAppContext,
     };
     use std::cell::RefCell;
     use std::path::PathBuf;
@@ -1346,6 +1346,10 @@ mod tests {
                 directories: true,
                 multiple: true,
                 prompt: None,
+                file_types: vec![PathPromptFileType {
+                    name: "STEP files".into(),
+                    extensions: vec!["step".into(), "stp".into()],
+                }],
             })
         });
         assert!(cx.did_prompt_for_paths());
@@ -1355,6 +1359,12 @@ mod tests {
             let selected = selected.clone();
             move |options| {
                 assert!(options.multiple);
+                assert_eq!(options.file_types.len(), 1);
+                assert_eq!(options.file_types[0].name.as_str(), "STEP files");
+                assert_eq!(
+                    options.file_types[0].extensions,
+                    ["step", "stp"].map(SharedString::from)
+                );
                 Some(selected)
             }
         });
@@ -1372,6 +1382,7 @@ mod tests {
                 directories: false,
                 multiple: false,
                 prompt: None,
+                file_types: Vec::new(),
             })
         });
 

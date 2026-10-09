@@ -17,10 +17,10 @@ use dispatch2::DispatchQueue;
 use futures::channel::oneshot;
 use gpui::{
     Action, AnyWindowHandle, BackgroundExecutor, ClipboardItem, CursorStyle, ForegroundExecutor,
-    KeyContext, Keymap, MacActivationPolicy, Menu, MenuItem, OsMenu, OwnedMenu, PathPromptOptions,
-    Platform, PlatformDisplay, PlatformKeyboardLayout, PlatformKeyboardMapper, PlatformTextSystem,
-    PlatformWindow, Result, SystemMenuType, Task, ThermalState, WindowAppearance, WindowKind,
-    WindowParams, popup::PopupNotSupportedError,
+    KeyContext, Keymap, MacActivationPolicy, Menu, MenuItem, OsMenu, OwnedMenu, PathPromptFileType,
+    PathPromptOptions, Platform, PlatformDisplay, PlatformKeyboardLayout, PlatformKeyboardMapper,
+    PlatformTextSystem, PlatformWindow, Result, SharedString, SystemMenuType, Task, ThermalState,
+    WindowAppearance, WindowKind, WindowParams, popup::PopupNotSupportedError,
 };
 use gpui_util::{ResultExt, new_std_command};
 use itertools::Itertools;
@@ -491,6 +491,30 @@ impl MacPlatform {
     }
 }
 
+/// The extensions an open panel enables for `file_types`: the union of every entry's
+/// extensions, in order, without duplicates or leading dots. Empty means every file.
+///
+/// `NSOpenPanel` has no type chooser without an accessory view, so the union is as
+/// close as AppKit gets to a list of alternatives.
+fn allowed_file_types(file_types: &[PathPromptFileType]) -> Vec<SharedString> {
+    file_types
+        .iter()
+        .flat_map(|file_type| file_type.extensions.iter())
+        .map(|extension| extension.trim_start_matches('.'))
+        .filter(|extension| !extension.is_empty())
+        .unique()
+        .map(SharedString::new)
+        .collect()
+}
+
+/// `allowedContentTypes` replaced this in macOS 11, but it takes `UTType`s, whose
+/// bindings this crate doesn't carry, and we still run on 10.15. Extensions are what the
+/// caller has and what `allowedFileTypes` accepts.
+#[allow(deprecated)]
+fn set_allowed_file_types(panel: &NSOpenPanel, extensions: &NSArray<NSString>) {
+    panel.setAllowedFileTypes(Some(extensions));
+}
+
 impl Platform for MacPlatform {
     fn background_executor(&self) -> BackgroundExecutor {
         self.0.lock().background_executor.clone()
@@ -817,6 +841,14 @@ impl Platform for MacPlatform {
 
                     panel.setCanCreateDirectories(true);
                     panel.setResolvesAliases(false);
+                    let extensions = allowed_file_types(&options.file_types);
+                    if !extensions.is_empty() {
+                        let extensions = extensions
+                            .iter()
+                            .map(|extension| ns_string(extension))
+                            .collect::<Vec<_>>();
+                        set_allowed_file_types(&panel, &NSArray::from_retained_slice(&extensions));
+                    }
                     let panel_for_callback = panel.clone();
                     let done_tx = Cell::new(Some(done_tx));
                     let block = RcBlock::new(move |response: objc2_app_kit::NSModalResponse| {
@@ -1569,4 +1601,37 @@ mod security {
     pub const errSecSuccess: OSStatus = 0;
     pub const errSecUserCanceled: OSStatus = -128;
     pub const errSecItemNotFound: OSStatus = -25300;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn file_type(name: &str, extensions: &[&str]) -> PathPromptFileType {
+        PathPromptFileType {
+            name: name.into(),
+            extensions: extensions
+                .iter()
+                .map(|&extension| extension.into())
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn allowed_file_types_is_the_ordered_union_of_every_entry() {
+        let file_types = [
+            file_type("STEP", &["step", "stp"]),
+            file_type("Meshes", &["stl", ".obj", "step"]),
+            file_type("Nothing", &["", "."]),
+        ];
+        assert_eq!(
+            allowed_file_types(&file_types),
+            ["step", "stp", "stl", "obj"].map(SharedString::new)
+        );
+    }
+
+    #[test]
+    fn no_file_types_means_no_filter() {
+        assert!(allowed_file_types(&[]).is_empty());
+    }
 }
