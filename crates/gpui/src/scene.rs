@@ -1127,6 +1127,8 @@ pub struct PaintSurface {
     pub order: DrawOrder,
     pub bounds: Bounds<ScaledPixels>,
     pub content_mask: ContentMask<ScaledPixels>,
+    /// The element's corner radii; the surface is clipped to them as a quad is.
+    pub corner_radii: Corners<ScaledPixels>,
     pub source: crate::SurfaceSource,
 }
 
@@ -1496,6 +1498,7 @@ mod tests {
             order: 0,
             bounds: full_bounds(),
             content_mask: mask(),
+            corner_radii: Corners::default(),
             source: SurfaceSource::Unsupported(Size::default()),
         }
     }

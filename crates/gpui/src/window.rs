@@ -5194,10 +5194,24 @@ impl Window {
         bounds: Bounds<Pixels>,
         source: impl Into<crate::SurfaceSource>,
     ) {
+        self.paint_rounded_surface(bounds, Corners::default(), source);
+    }
+
+    /// Paint a surface clipped to `corner_radii` into the scene for the next frame at the
+    /// current z-index.
+    ///
+    /// This method should only be called as part of the paint phase of element drawing.
+    pub fn paint_rounded_surface(
+        &mut self,
+        bounds: Bounds<Pixels>,
+        corner_radii: Corners<Pixels>,
+        source: impl Into<crate::SurfaceSource>,
+    ) {
         use crate::PaintSurface;
 
         self.invalidator.debug_assert_paint();
 
+        let scale_factor = self.scale_factor();
         let bounds = self.snap_bounds(bounds);
         let content_mask = self.snapped_content_mask();
         self.next_frame.scene.insert_surface(
@@ -5205,6 +5219,7 @@ impl Window {
                 order: 0,
                 bounds,
                 content_mask,
+                corner_radii: corner_radii.scale(scale_factor),
                 source: source.into(),
             },
             self.element_opacity(),

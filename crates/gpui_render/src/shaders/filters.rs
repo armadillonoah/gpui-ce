@@ -8,14 +8,11 @@ pub mod surface {
     pub struct SurfaceUniforms {
         pub bounds: Bounds,
         pub content_mask: ContentMask,
+        pub corner_radii: Corners,
         pub color_format: SurfaceColorFormat,
         pub opacity: f32,
         pub padding0: u32,
         pub padding1: u32,
-        pub padding2: u32,
-        pub padding3: u32,
-        pub padding4: u32,
-        pub padding5: u32,
     }
     uniform!(group(1), binding(0), SURFACE_LOCALS: SurfaceUniforms);
     texture!(group(1), binding(1), SURFACE_TEXTURE: Texture2D<f32>);
@@ -70,7 +67,13 @@ pub mod surface {
             return transparent();
         }
         let locals = get!(SURFACE_LOCALS);
-        let fade = ContentMask::alpha(locals.content_mask, input.position.xy());
+        // Clipped to the element's corner radii as a quad is.
+        let corner_coverage = antialiased_coverage(rounded_rectangle_signed_distance(
+            input.position.xy(),
+            locals.bounds,
+            locals.corner_radii,
+        ));
+        let fade = ContentMask::alpha(locals.content_mask, input.position.xy()) * corner_coverage;
         if locals.color_format == SurfaceColorFormat::Yuv {
             return sample_yuv_surface(input.texture_position) * locals.opacity * fade;
         }
