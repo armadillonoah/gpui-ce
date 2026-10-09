@@ -254,6 +254,10 @@ pub enum BackgroundTag {
     PatternSlash = 2,
     /// Alternating colored and transparent squares.
     Checkerboard = 3,
+    /// A two-stop radial gradient.
+    RadialGradient = 4,
+    /// A three-stop radial gradient.
+    RadialGradient3 = 5,
 }
 
 /// A color space for color interpolation.
@@ -280,17 +284,28 @@ impl Display for ColorSpace {
     }
 }
 
-/// A background color, which can be either a solid color or a linear gradient.
+/// A background color, which can be a solid color, a linear or radial gradient, or a pattern.
 #[derive(Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[repr(C)]
 pub struct Background {
     pub(crate) tag: BackgroundTag,
     pub(crate) color_space: ColorSpace,
+    /// The flat color of `Solid` and the patterns, and the last stop's color of
+    /// `RadialGradient3`.
     pub(crate) solid: crate::SceneHsla,
+    /// The angle of `LinearGradient`, the packed geometry of the patterns, and the last
+    /// stop's position of `RadialGradient3`.
     pub(crate) gradient_angle_or_pattern_height: f32,
     pub(crate) colors: [LinearColorStop; 2],
     /// Padding for alignment for repr(C) layout.
     pub(crate) padding: u32,
+    /// The center of a radial gradient, as a fraction of the painted bounds.
+    pub(crate) radial_center_x: f32,
+    pub(crate) radial_center_y: f32,
+    /// The radii of a radial gradient, as fractions of the painted bounds. Separate radii
+    /// make the gradient elliptical.
+    pub(crate) radial_radius_x: f32,
+    pub(crate) radial_radius_y: f32,
 }
 
 impl std::fmt::Debug for Background {
@@ -312,6 +327,27 @@ impl std::fmt::Debug for Background {
                 "Checkerboard({:?}, {})",
                 self.solid, self.gradient_angle_or_pattern_height
             ),
+            BackgroundTag::RadialGradient => write!(
+                f,
+                "RadialGradient(center: ({}, {}), radii: ({}, {}), {:?}, {:?})",
+                self.radial_center_x,
+                self.radial_center_y,
+                self.radial_radius_x,
+                self.radial_radius_y,
+                self.colors[0],
+                self.colors[1]
+            ),
+            BackgroundTag::RadialGradient3 => write!(
+                f,
+                "RadialGradient3(center: ({}, {}), radii: ({}, {}), {:?}, {:?}, {:?})",
+                self.radial_center_x,
+                self.radial_center_y,
+                self.radial_radius_x,
+                self.radial_radius_y,
+                self.colors[0],
+                self.colors[1],
+                self.last_radial_stop()
+            ),
         }
     }
 }
@@ -326,6 +362,10 @@ impl Default for Background {
             gradient_angle_or_pattern_height: 0.0,
             colors: [LinearColorStop::default(), LinearColorStop::default()],
             padding: 0,
+            radial_center_x: 0.0,
+            radial_center_y: 0.0,
+            radial_radius_x: 0.0,
+            radial_radius_y: 0.0,
         }
     }
 }
@@ -382,6 +422,89 @@ pub fn linear_gradient(
         gradient_angle_or_pattern_height: angle,
         colors: [from.into(), to.into()],
         color_space: ColorSpace::Oklab,
+        ..Default::default()
+    }
+}
+
+/// Creates a two-stop radial gradient background.
+///
+/// `center` is the gradient's center and `radii` its horizontal and vertical extent, both as
+/// fractions of the painted bounds, so `(0.5, 0.5)` is the middle of the element and radii of
+/// `(0.5, 0.5)` reach its edges. Unequal radii make the gradient elliptical, like CSS
+/// `radial-gradient(ellipse 50% 30% at 50% 50%, ...)`. Each stop's percentage is the distance
+/// from the center as a fraction of the radii: `from` paints at and inside its percentage,
+/// `to` at and beyond its own.
+///
+/// ```
+/// use gpui::{linear_color_stop, radial_gradient, rgb};
+///
+/// let glow = radial_gradient(
+///     (0.5, 0.0),
+///     (0.5, 0.5),
+///     linear_color_stop(rgb(0xffffff), 0.0),
+///     linear_color_stop(rgb(0x000000), 1.0),
+/// );
+/// assert!(!glow.is_transparent());
+/// ```
+///
+/// <https://developer.mozilla.org/en-US/docs/Web/CSS/gradient/radial-gradient>
+pub fn radial_gradient(
+    center: (f32, f32),
+    radii: (f32, f32),
+    from: impl Into<LinearColorStop>,
+    to: impl Into<LinearColorStop>,
+) -> Background {
+    Background {
+        tag: BackgroundTag::RadialGradient,
+        colors: [from.into(), to.into()],
+        color_space: ColorSpace::Oklab,
+        radial_center_x: center.0,
+        radial_center_y: center.1,
+        radial_radius_x: radii.0,
+        radial_radius_y: radii.1,
+        ..Default::default()
+    }
+}
+
+/// Creates a three-stop radial gradient background.
+///
+/// `center` and `radii` mean the same as in [`radial_gradient`]. The three stops must be
+/// given in increasing order of percentage; the color is interpolated from `first` to
+/// `middle` and then from `middle` to `last`.
+///
+/// ```
+/// use gpui::{linear_color_stop, radial_gradient_3, rgb};
+///
+/// let ground = radial_gradient_3(
+///     (0.5, 0.5),
+///     (0.7, 0.5),
+///     linear_color_stop(rgb(0xffffff), 0.0),
+///     linear_color_stop(rgb(0x8080ff), 0.4),
+///     linear_color_stop(rgb(0x000000), 1.0),
+/// );
+/// assert!(!ground.is_transparent());
+/// ```
+///
+/// <https://developer.mozilla.org/en-US/docs/Web/CSS/gradient/radial-gradient>
+pub fn radial_gradient_3(
+    center: (f32, f32),
+    radii: (f32, f32),
+    first: impl Into<LinearColorStop>,
+    middle: impl Into<LinearColorStop>,
+    last: impl Into<LinearColorStop>,
+) -> Background {
+    let last = last.into();
+    Background {
+        tag: BackgroundTag::RadialGradient3,
+        colors: [first.into(), middle.into()],
+        // The third stop rides in the fields the two-stop gradients leave unused.
+        solid: last.color,
+        gradient_angle_or_pattern_height: last.percentage,
+        color_space: ColorSpace::Oklab,
+        radial_center_x: center.0,
+        radial_center_y: center.1,
+        radial_radius_x: radii.0,
+        radial_radius_y: radii.1,
         ..Default::default()
     }
 }
@@ -447,6 +570,24 @@ pub enum BackgroundKind {
         /// The width and height of each square, in logical pixels.
         size: f32,
     },
+    /// A radial gradient between two color stops.
+    RadialGradient {
+        /// The center, as a fraction of the painted bounds.
+        center: (f32, f32),
+        /// The horizontal and vertical radii, as fractions of the painted bounds.
+        radii: (f32, f32),
+        /// The innermost and outermost stops.
+        stops: [LinearColorStop; 2],
+    },
+    /// A radial gradient through three color stops.
+    RadialGradient3 {
+        /// The center, as a fraction of the painted bounds.
+        center: (f32, f32),
+        /// The horizontal and vertical radii, as fractions of the painted bounds.
+        radii: (f32, f32),
+        /// The stops, from the center outwards.
+        stops: [LinearColorStop; 3],
+    },
 }
 
 impl Background {
@@ -484,6 +625,25 @@ impl Background {
                 color: self.solid.into(),
                 size: self.gradient_angle_or_pattern_height,
             },
+            BackgroundTag::RadialGradient => BackgroundKind::RadialGradient {
+                center: (self.radial_center_x, self.radial_center_y),
+                radii: (self.radial_radius_x, self.radial_radius_y),
+                stops: self.colors,
+            },
+            BackgroundTag::RadialGradient3 => BackgroundKind::RadialGradient3 {
+                center: (self.radial_center_x, self.radial_center_y),
+                radii: (self.radial_radius_x, self.radial_radius_y),
+                stops: [self.colors[0], self.colors[1], self.last_radial_stop()],
+            },
+        }
+    }
+
+    /// The third stop of a `RadialGradient3`, which `radial_gradient_3` packs into the
+    /// fields the two-stop gradients leave unused.
+    fn last_radial_stop(&self) -> LinearColorStop {
+        LinearColorStop {
+            color: self.solid,
+            percentage: self.gradient_angle_or_pattern_height,
         }
     }
 
@@ -516,7 +676,12 @@ impl Background {
     pub fn is_transparent(&self) -> bool {
         match self.tag {
             BackgroundTag::Solid => self.solid.a == 0.,
-            BackgroundTag::LinearGradient => self.colors.iter().all(|c| c.color.a == 0.),
+            BackgroundTag::LinearGradient | BackgroundTag::RadialGradient => {
+                self.colors.iter().all(|c| c.color.a == 0.)
+            }
+            BackgroundTag::RadialGradient3 => {
+                self.solid.a == 0. && self.colors.iter().all(|c| c.color.a == 0.)
+            }
             BackgroundTag::PatternSlash => self.solid.a == 0.,
             BackgroundTag::Checkerboard => self.solid.a == 0.,
         }
@@ -563,6 +728,98 @@ mod tests {
         assert_eq!(background.opacity(0.5).colors[1], to.opacity(0.5));
         assert!(!background.is_transparent());
         assert!(background.opacity(0.0).is_transparent());
+    }
+
+    #[test]
+    fn test_background_radial_gradient() {
+        let from = linear_color_stop(rgba(0xff0099ff), 0.1);
+        let to = linear_color_stop(rgba(0x00ff99ff), 0.9);
+        let background = radial_gradient((0.25, 0.75), (0.5, 0.8), from, to);
+        assert_eq!(background.tag, BackgroundTag::RadialGradient);
+        assert_eq!(background.color_space, ColorSpace::Oklab);
+        assert_eq!(background.colors, [from, to]);
+        assert_eq!(
+            background.kind(),
+            BackgroundKind::RadialGradient {
+                center: (0.25, 0.75),
+                radii: (0.5, 0.8),
+                stops: [from, to],
+            }
+        );
+
+        assert_eq!(
+            background.opacity(0.5).colors,
+            [from.opacity(0.5), to.opacity(0.5)]
+        );
+        assert!(!background.is_transparent());
+        assert!(background.opacity(0.0).is_transparent());
+    }
+
+    #[test]
+    fn test_background_radial_gradient_3() {
+        let first = linear_color_stop(rgba(0xff0099ff), 0.0);
+        let middle = linear_color_stop(rgba(0x00ff99cc), 0.35);
+        let last = linear_color_stop(rgba(0x00009980), 1.0);
+        let background = radial_gradient_3((0.25, 0.75), (0.5, 0.8), first, middle, last);
+        assert_eq!(background.tag, BackgroundTag::RadialGradient3);
+        assert_eq!(background.color_space, ColorSpace::Oklab);
+        assert_eq!(
+            background.kind(),
+            BackgroundKind::RadialGradient3 {
+                center: (0.25, 0.75),
+                radii: (0.5, 0.8),
+                stops: [first, middle, last],
+            }
+        );
+
+        // The third stop lives in `solid` and `gradient_angle_or_pattern_height`, so
+        // `opacity` must reach it like the other two.
+        let faded = background.opacity(0.5);
+        let BackgroundKind::RadialGradient3 { stops, .. } = faded.kind() else {
+            panic!("opacity changed the background kind");
+        };
+        assert_eq!(
+            stops,
+            [first.opacity(0.5), middle.opacity(0.5), last.opacity(0.5)]
+        );
+        assert!(!background.is_transparent());
+        assert!(background.opacity(0.0).is_transparent());
+
+        // A gradient whose only opaque stop is the last one is still visible.
+        let mut only_last = background;
+        only_last.colors = [first.opacity(0.0), middle.opacity(0.0)];
+        assert!(!only_last.is_transparent());
+    }
+
+    #[test]
+    fn radial_gradients_leave_existing_background_fields_in_place() {
+        // The radial geometry is appended, so every existing shader-visible offset and the
+        // defaults of the other kinds are unchanged.
+        assert_eq!(std::mem::size_of::<Background>(), 88);
+        assert_eq!(std::mem::offset_of!(Background, tag), 0);
+        assert_eq!(std::mem::offset_of!(Background, color_space), 4);
+        assert_eq!(std::mem::offset_of!(Background, solid), 8);
+        assert_eq!(
+            std::mem::offset_of!(Background, gradient_angle_or_pattern_height),
+            24
+        );
+        assert_eq!(std::mem::offset_of!(Background, colors), 28);
+        assert_eq!(std::mem::offset_of!(Background, padding), 68);
+        assert_eq!(std::mem::offset_of!(Background, radial_center_x), 72);
+        assert_eq!(std::mem::offset_of!(Background, radial_radius_y), 84);
+
+        let from = linear_color_stop(rgba(0xff0099ff), 0.0);
+        let to = linear_color_stop(rgba(0x00ff99ff), 1.0);
+        let linear = linear_gradient(90.0, from, to);
+        assert_eq!(
+            (
+                linear.radial_center_x,
+                linear.radial_center_y,
+                linear.radial_radius_x,
+                linear.radial_radius_y
+            ),
+            (0.0, 0.0, 0.0, 0.0)
+        );
     }
 
     #[test]

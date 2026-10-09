@@ -7,7 +7,8 @@ use gpui::{
     AtlasKey, AtlasTile, BackdropFilter, BorderStyle, Bounds, ColorSpace, ContentMask, Corners,
     DevicePixels, Edges, Hsla, MonochromeSprite, PlatformHeadlessRenderer, Point, PolychromeSprite,
     Quad, RenderImageParams, RenderSvgParams, ScaledFilter, ScaledPixels, Scene, ShaderBool,
-    Shadow, Size, Underline, checkerboard, linear_color_stop, linear_gradient, solid_background,
+    Shadow, Size, Underline, checkerboard, linear_color_stop, linear_gradient, radial_gradient,
+    radial_gradient_3, solid_background,
 };
 use gpui_ce_wgpu::WgpuHeadlessRenderer;
 use smallvec::smallvec;
@@ -624,4 +625,79 @@ fn content_mask_clips_to_rounded_corners() {
     assert_eq!(pixel(99, 99)[0], 255);
     // The bounds still clip hard where the mask ends.
     assert_eq!(pixel(100, 50)[0], 0);
+}
+
+#[test]
+fn radial_gradients_fade_from_center_to_edge() {
+    let mut renderer = WgpuHeadlessRenderer::new().expect("headless renderer");
+    let mut scene = Scene::default();
+    let white: Hsla = gpui::rgb_to_hsla(gpui::rgb(0xffffff));
+    let blue: Hsla = gpui::rgb_to_hsla(gpui::rgb(0x0000ff));
+    let black: Hsla = gpui::rgb_to_hsla(gpui::rgb(0x000000));
+    // A 200x100 quad with radii of half the bounds: the gradient's ellipse touches all four
+    // edges, so the horizontal and vertical edges are equally far from the center.
+    scene.insert_primitive(Quad {
+        order: 0,
+        bounds: bounds(0.0, 0.0, 200.0, 100.0),
+        content_mask: full_mask(),
+        background: radial_gradient(
+            (0.5, 0.5),
+            (0.5, 0.5),
+            linear_color_stop(white, 0.0),
+            linear_color_stop(blue, 1.0),
+        )
+        .color_space(ColorSpace::Srgb),
+        ..Default::default()
+    });
+    // Three stops: white, then black half way out, then white again on the edge.
+    scene.insert_primitive(Quad {
+        order: 0,
+        bounds: bounds(210.0, 0.0, 100.0, 100.0),
+        content_mask: full_mask(),
+        background: radial_gradient_3(
+            (0.5, 0.5),
+            (0.5, 0.5),
+            linear_color_stop(white, 0.0),
+            linear_color_stop(black, 0.5),
+            linear_color_stop(white, 1.0),
+        )
+        .color_space(ColorSpace::Srgb),
+        ..Default::default()
+    });
+    scene.finish();
+
+    let image = renderer
+        .render_scene_to_image(&scene, TARGET)
+        .expect("render must succeed");
+    // Pixels are sampled at their centers, half a pixel off the geometric center and edges,
+    // the target holds linear values, and gradients are dithered, so a stop's color is only
+    // approached. A channel above 230 is "bright" and one below 12 is "dark".
+    let pixel = |x: u32, y: u32| {
+        let [r, g, b, _] = image.get_pixel(x, y).0;
+        (r, g, b)
+    };
+    let bright = |channel: u8| channel >= 230;
+    let dark = |channel: u8| channel <= 12;
+    let mut failures = Vec::new();
+    let mut check = |name: &str, x: u32, y: u32, expected: [fn(u8) -> bool; 3]| {
+        let (r, g, b) = pixel(x, y);
+        if !(expected[0](r) && expected[1](g) && expected[2](b)) {
+            failures.push(format!("{name} at ({x},{y}): got ({r},{g},{b})"));
+        }
+    };
+    let white = [bright as fn(u8) -> bool, bright, bright];
+    let blue = [dark as fn(u8) -> bool, dark, bright];
+    let black = [dark as fn(u8) -> bool, dark, dark];
+    check("two-stop center should be white", 100, 50, white);
+    check("two-stop right edge should be blue", 198, 50, blue);
+    check("two-stop bottom edge should be blue", 100, 98, blue);
+    check("three-stop center should be white", 260, 50, white);
+    check("three-stop middle stop should be black", 285, 50, black);
+    check("three-stop edge should be white", 309, 50, white);
+    let (r, g, b) = pixel(150, 50);
+    assert!(
+        r.abs_diff(g) <= 4 && r > 32 && r < 224 && b > r,
+        "two-stop mid point should be partly blended, got ({r},{g},{b})"
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

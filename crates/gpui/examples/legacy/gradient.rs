@@ -5,7 +5,8 @@ mod example_support;
 
 use gpui::{
     App, Bounds, ColorSpace, Context, Half, Render, Window, WindowOptions, canvas, div,
-    linear_color_stop, linear_gradient, point, prelude::*, px, size,
+    linear_color_stop, linear_gradient, point, prelude::*, px, radial_gradient, radial_gradient_3,
+    size,
 };
 use gpui_platform::application;
 
@@ -205,6 +206,41 @@ impl Render for GradientViewer {
                             180.,
                             linear_color_stop(gpui::green(), 0.),
                             linear_color_stop(gpui::blue(), 0.5),
+                        )
+                        .color_space(color_space)),
+                    ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_1()
+                    .gap_3()
+                    .h_24()
+                    .child(
+                        div().flex_1().rounded_xl().bg(radial_gradient(
+                            (0.5, 0.5),
+                            (0.5, 0.5),
+                            linear_color_stop(gpui::white(), 0.),
+                            linear_color_stop(gpui::blue(), 1.),
+                        )
+                        .color_space(color_space)),
+                    )
+                    .child(
+                        div().flex_1().rounded_xl().bg(radial_gradient(
+                            (0.2, 0.2),
+                            (0.8, 1.2),
+                            linear_color_stop(gpui::yellow(), 0.),
+                            linear_color_stop(gpui::red(), 1.),
+                        )
+                        .color_space(color_space)),
+                    )
+                    .child(
+                        div().flex_1().rounded_xl().bg(radial_gradient_3(
+                            (0.5, 1.0),
+                            (0.6, 1.0),
+                            linear_color_stop(gpui::white(), 0.),
+                            linear_color_stop(gpui::green(), 0.5),
+                            linear_color_stop(gpui::blue(), 1.),
                         )
                         .color_space(color_space)),
                     ),

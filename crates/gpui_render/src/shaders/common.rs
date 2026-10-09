@@ -14,6 +14,7 @@ mod source {
     pub const PATTERN_PACKING_RADIX: f32 = 65535.0;
     pub const MIN_NORMALIZED_WEIGHT: f32 = 0.00001;
     pub const MIN_PATH_GRADIENT: f32 = 0.001;
+    pub const MIN_RADIAL_GRADIENT_RADIUS: f32 = 0.000001;
     pub const UNDERLINE_WAVE_FREQUENCY: f32 = 2.0;
     pub const UNDERLINE_WAVE_HEIGHT_RATIO: f32 = 0.8;
     pub const GRADIENT_DITHER_SCALE: f32 = 0.6180339887;
@@ -73,6 +74,8 @@ mod source {
         LinearGradient = 1,
         PatternSlash = 2,
         Checkerboard = 3,
+        RadialGradient = 4,
+        RadialGradient3 = 5,
     }
 
     #[repr(u32)]
@@ -251,6 +254,10 @@ mod source {
         pub gradient_angle_or_pattern_height: f32,
         pub colors: [LinearColorStop; 2],
         pub padding: u32,
+        pub radial_center_x: f32,
+        pub radial_center_y: f32,
+        pub radial_radius_x: f32,
+        pub radial_radius_y: f32,
     }
     #[derive(Clone, Copy, Wgsl)]
     pub struct AtlasTextureId {
@@ -647,18 +654,30 @@ mod source {
         }
     }
 
+    pub fn is_gradient(tag: BackgroundTag) -> bool {
+        tag == BackgroundTag::LinearGradient
+            || tag == BackgroundTag::RadialGradient
+            || tag == BackgroundTag::RadialGradient3
+    }
+
     pub fn prepare_paint(paint: Paint) -> PreparedPaint {
         let mut prepared = PreparedPaint::new(transparent(), transparent(), transparent());
 
-        if paint.background.tag == BackgroundTag::LinearGradient {
+        if is_gradient(paint.background.tag) {
             prepared.color0 = hsla_to_rgba(paint.background.colors[0usize].color);
             prepared.color1 = hsla_to_rgba(paint.background.colors[1usize].color);
+            // A three-stop radial gradient keeps its last stop's color in `solid`.
+            if paint.background.tag == BackgroundTag::RadialGradient3 {
+                prepared.solid = hsla_to_rgba(paint.background.solid);
+            }
             if paint.background.color_space == ColorSpace::Srgb {
                 prepared.color0 = linear_to_srgba(prepared.color0);
                 prepared.color1 = linear_to_srgba(prepared.color1);
+                prepared.solid = linear_to_srgba(prepared.solid);
             } else {
                 prepared.color0 = linear_srgb_to_oklab(prepared.color0);
                 prepared.color1 = linear_srgb_to_oklab(prepared.color1);
+                prepared.solid = linear_srgb_to_oklab(prepared.solid);
             }
         } else {
             prepared.solid = hsla_to_rgba(paint.background.solid);
@@ -705,15 +724,81 @@ mod source {
         )
     }
 
-    pub fn linear_gradient_color(paint: Paint, position: Vec2f, prepared: PreparedPaint) -> Vec4f {
-        let ratio = linear_gradient_ratio(paint, position);
+    pub fn interpolate_gradient(paint: Paint, start: Vec4f, end: Vec4f, ratio: f32) -> Vec4f {
         let ratio4 = vec4f(ratio, ratio, ratio, ratio);
-        let interpolated = mix(prepared.color0, prepared.color1, ratio4);
+        let interpolated = mix(start, end, ratio4);
         let mut color = transparent();
         if paint.background.color_space == ColorSpace::Oklab {
             color = oklab_to_linear_srgb(interpolated);
         } else {
             color = srgba_to_linear(interpolated);
+        }
+        color
+    }
+
+    pub fn linear_gradient_color(paint: Paint, position: Vec2f, prepared: PreparedPaint) -> Vec4f {
+        let ratio = linear_gradient_ratio(paint, position);
+        interpolate_gradient(paint, prepared.color0, prepared.color1, ratio)
+            + gradient_dither(position)
+    }
+
+    /// Distance of `position` from the radial gradient's center, as a fraction of its radii:
+    /// `0.0` at the center, `1.0` on the ellipse the radii describe.
+    pub fn radial_gradient_distance(paint: Paint, position: Vec2f) -> f32 {
+        let relative = (position - paint.bounds.origin) / paint.bounds.size;
+        let center = vec2f(
+            paint.background.radial_center_x,
+            paint.background.radial_center_y,
+        );
+        let radii = max(
+            vec2f(
+                paint.background.radial_radius_x,
+                paint.background.radial_radius_y,
+            ),
+            vec2f(MIN_RADIAL_GRADIENT_RADIUS, MIN_RADIAL_GRADIENT_RADIUS),
+        );
+        length((relative - center) / radii)
+    }
+
+    /// Where `distance` falls between two stops, clamped to the segment.
+    pub fn gradient_stop_ratio(distance: f32, first_stop: f32, last_stop: f32) -> f32 {
+        saturate((distance - first_stop) / (last_stop - first_stop))
+    }
+
+    pub fn radial_gradient_color(paint: Paint, position: Vec2f, prepared: PreparedPaint) -> Vec4f {
+        let distance = radial_gradient_distance(paint, position);
+        let ratio = gradient_stop_ratio(
+            distance,
+            paint.background.colors[0usize].percentage,
+            paint.background.colors[1usize].percentage,
+        );
+        interpolate_gradient(paint, prepared.color0, prepared.color1, ratio)
+            + gradient_dither(position)
+    }
+
+    pub fn radial_gradient_3_color(
+        paint: Paint,
+        position: Vec2f,
+        prepared: PreparedPaint,
+    ) -> Vec4f {
+        let distance = radial_gradient_distance(paint, position);
+        let middle_stop = paint.background.colors[1usize].percentage;
+        let mut color = transparent();
+        if distance <= middle_stop {
+            let ratio = gradient_stop_ratio(
+                distance,
+                paint.background.colors[0usize].percentage,
+                middle_stop,
+            );
+            color = interpolate_gradient(paint, prepared.color0, prepared.color1, ratio);
+        } else {
+            // The last stop's position rides in `gradient_angle_or_pattern_height`.
+            let ratio = gradient_stop_ratio(
+                distance,
+                middle_stop,
+                paint.background.gradient_angle_or_pattern_height,
+            );
+            color = interpolate_gradient(paint, prepared.color1, prepared.solid, ratio);
         }
         color + gradient_dither(position)
     }
@@ -760,6 +845,12 @@ mod source {
             }
             BackgroundTag::Checkerboard => {
                 color = checkerboard_color(paint, position, prepared.solid);
+            }
+            BackgroundTag::RadialGradient => {
+                color = radial_gradient_color(paint, position, prepared);
+            }
+            BackgroundTag::RadialGradient3 => {
+                color = radial_gradient_3_color(paint, position, prepared);
             }
         }
         color
