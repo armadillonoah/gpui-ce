@@ -168,8 +168,10 @@ impl WindowsWgpuRenderer {
         Ok(self.renderer.gpu_specs())
     }
 
-    pub fn gpu_context(&self) -> (Arc<wgpu::Device>, Arc<wgpu::Queue>) {
-        self.renderer.gpu_context()
+    /// The shared device and queue, or `None` while the device is lost: the old
+    /// device is useless then, and a failed recovery attempt leaves no resources.
+    pub fn gpu_context(&self) -> Option<(Arc<wgpu::Device>, Arc<wgpu::Queue>)> {
+        (!self.renderer.device_lost()).then(|| self.renderer.gpu_context())
     }
 
     pub fn device_lost(&self) -> bool {

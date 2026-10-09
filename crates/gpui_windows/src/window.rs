@@ -1150,8 +1150,8 @@ impl PlatformWindow for WindowsWindow {
 
     #[cfg(feature = "wgpu")]
     fn gpu_context(&self) -> Option<Box<dyn std::any::Any>> {
-        let (device, queue) = self.state.renderer.borrow().gpu_context();
-        Some(Box::new((device, queue)))
+        let context = self.state.renderer.borrow().gpu_context()?;
+        Some(Box::new(context))
     }
 
     #[cfg(feature = "wgpu")]
