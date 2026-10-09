@@ -24,6 +24,7 @@ mod source {
     pub const GRADIENT_DITHER_MULTIPLIER_A: f32 = 43758.5453;
     pub const GRADIENT_DITHER_MULTIPLIER_B: f32 = 24634.6345;
     pub const DIAGONAL_STRIPE_ANGLE: f32 = PI / 4.0;
+    pub const MINIMUM_GRADIENT_SPAN: f32 = 0.0001;
     pub const REC_601_LUMA_WEIGHTS: Vec3f = vec3f(0.30, 0.59, 0.11);
     pub const LINEAR_RGB_LUMA_WEIGHTS: Vec3f = vec3f(0.2126, 0.7152, 0.0722);
     pub const SRGB_DECODE_CUTOFF: f32 = 0.04045;
@@ -76,6 +77,7 @@ mod source {
         RadialGradient = 4,
         AngularGradient = 5,
         DiamondGradient = 6,
+        RadialGradient3 = 7,
     }
 
     #[repr(u32)]
@@ -236,6 +238,10 @@ mod source {
         pub gradient_angle_or_pattern_height: f32,
         pub colors: [LinearColorStop; 2],
         pub padding: u32,
+        pub center_x: f32,
+        pub center_y: f32,
+        pub radius_x: f32,
+        pub radius_y: f32,
     }
     #[derive(Clone, Copy, Wgsl)]
     pub struct AtlasTextureId {
@@ -632,22 +638,36 @@ mod source {
         }
     }
 
+    /// A gradient stop's color in the space its gradient interpolates in.
+    pub fn gradient_stop_color(color: Hsla, color_space: ColorSpace) -> Vec4f {
+        let rgba = hsla_to_rgba(color);
+        let mut prepared = transparent();
+        if color_space == ColorSpace::Srgb {
+            prepared = linear_to_srgba(rgba);
+        } else {
+            prepared = linear_srgb_to_oklab(rgba);
+        }
+        prepared
+    }
+
     pub fn prepare_paint(paint: Paint) -> PreparedPaint {
         let mut prepared = PreparedPaint::new(transparent(), transparent(), transparent());
+        let tag = paint.background.tag;
+        let color_space = paint.background.color_space;
 
-        if paint.background.tag == BackgroundTag::LinearGradient
-            || paint.background.tag == BackgroundTag::RadialGradient
-            || paint.background.tag == BackgroundTag::AngularGradient
-            || paint.background.tag == BackgroundTag::DiamondGradient
+        if tag == BackgroundTag::LinearGradient
+            || tag == BackgroundTag::RadialGradient
+            || tag == BackgroundTag::AngularGradient
+            || tag == BackgroundTag::DiamondGradient
+            || tag == BackgroundTag::RadialGradient3
         {
-            prepared.color0 = hsla_to_rgba(paint.background.colors[0usize].color);
-            prepared.color1 = hsla_to_rgba(paint.background.colors[1usize].color);
-            if paint.background.color_space == ColorSpace::Srgb {
-                prepared.color0 = linear_to_srgba(prepared.color0);
-                prepared.color1 = linear_to_srgba(prepared.color1);
-            } else {
-                prepared.color0 = linear_srgb_to_oklab(prepared.color0);
-                prepared.color1 = linear_srgb_to_oklab(prepared.color1);
+            prepared.color0 =
+                gradient_stop_color(paint.background.colors[0usize].color, color_space);
+            prepared.color1 =
+                gradient_stop_color(paint.background.colors[1usize].color, color_space);
+            if tag == BackgroundTag::RadialGradient3 {
+                // A three-stop radial gradient keeps its last stop's color in `solid`.
+                prepared.solid = gradient_stop_color(paint.background.solid, color_space);
             }
         } else {
             prepared.solid = hsla_to_rgba(paint.background.solid);
@@ -714,17 +734,67 @@ mod source {
         )
     }
 
-    pub fn gradient_color(paint: Paint, position: Vec2f, prepared: PreparedPaint) -> Vec4f {
-        let ratio = gradient_ratio(paint, position);
+    /// The color `ratio` of the way from `start` to `end`, both prepared in
+    /// `color_space`, dithered at `position`.
+    pub fn interpolated_gradient_color(
+        color_space: ColorSpace,
+        start: Vec4f,
+        end: Vec4f,
+        ratio: f32,
+        position: Vec2f,
+    ) -> Vec4f {
         let ratio4 = vec4f(ratio, ratio, ratio, ratio);
-        let interpolated = mix(prepared.color0, prepared.color1, ratio4);
+        let interpolated = mix(start, end, ratio4);
         let mut color = transparent();
-        if paint.background.color_space == ColorSpace::Oklab {
+        if color_space == ColorSpace::Oklab {
             color = oklab_to_linear_srgb(interpolated);
         } else {
             color = srgba_to_linear(interpolated);
         }
         color + gradient_dither(position)
+    }
+
+    pub fn gradient_color(paint: Paint, position: Vec2f, prepared: PreparedPaint) -> Vec4f {
+        let ratio = gradient_ratio(paint, position);
+        interpolated_gradient_color(
+            paint.background.color_space,
+            prepared.color0,
+            prepared.color1,
+            ratio,
+            position,
+        )
+    }
+
+    /// Where `distance` falls between two stops: zero at `first`, one at `last`.
+    pub fn gradient_stop_ratio(distance: f32, first: f32, last: f32) -> f32 {
+        saturate((distance - first) / max(last - first, MINIMUM_GRADIENT_SPAN))
+    }
+
+    pub fn radial_gradient_3_color(
+        paint: Paint,
+        position: Vec2f,
+        prepared: PreparedPaint,
+    ) -> Vec4f {
+        let background = paint.background;
+        // Measured in pixels so empty bounds stay finite: one on the ellipse.
+        let center = paint.bounds.origin
+            + paint.bounds.size * vec2f(background.center_x, background.center_y);
+        let radii = paint.bounds.size * vec2f(background.radius_x, background.radius_y);
+        let distance = length(
+            (position - center) / max(radii, vec2f(MINIMUM_GRADIENT_SPAN, MINIMUM_GRADIENT_SPAN)),
+        );
+        let first = background.colors[0usize].percentage;
+        let middle = background.colors[1usize].percentage;
+        let last = background.gradient_angle_or_pattern_height;
+        let mut start = prepared.color1;
+        let mut end = prepared.solid;
+        let mut ratio = gradient_stop_ratio(distance, middle, last);
+        if distance <= middle {
+            start = prepared.color0;
+            end = prepared.color1;
+            ratio = gradient_stop_ratio(distance, first, middle);
+        }
+        interpolated_gradient_color(background.color_space, start, end, ratio, position)
     }
 
     pub fn slash_pattern_color(paint: Paint, position: Vec2f, solid: Vec4f) -> Vec4f {
@@ -772,6 +842,9 @@ mod source {
             }
             BackgroundTag::DiamondGradient => {
                 color = gradient_color(paint, position, prepared);
+            }
+            BackgroundTag::RadialGradient3 => {
+                color = radial_gradient_3_color(paint, position, prepared);
             }
             BackgroundTag::PatternSlash => {
                 color = slash_pattern_color(paint, position, prepared.solid);

@@ -44,7 +44,11 @@ pub const SCENE_BUFFER_LAYOUTS: &[SceneBufferLayout] = &[
         solid,
         gradient_angle_or_pattern_height,
         colors,
-        padding
+        padding,
+        center_x,
+        center_y,
+        radius_x,
+        radius_y
     ),
     layout!(AtlasTextureId, "AtlasTextureId", index, kind),
     layout!(AtlasTile, "AtlasTile", texture_id, tile_id, padding, bounds),

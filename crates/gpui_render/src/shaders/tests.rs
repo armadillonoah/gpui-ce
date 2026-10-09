@@ -103,8 +103,8 @@ fn ordinary_vertex_interfaces_stay_within_compact_budgets() {
 #[test]
 fn scene_instance_storage_sizes_are_bounded() {
     for (name, actual, maximum) in [
-        ("Quad", std::mem::size_of::<gpui::Quad>(), 248),
-        ("Shadow", std::mem::size_of::<gpui::Shadow>(), 184),
+        ("Quad", std::mem::size_of::<gpui::Quad>(), 280),
+        ("Shadow", std::mem::size_of::<gpui::Shadow>(), 200),
         (
             "PolychromeSprite",
             std::mem::size_of::<gpui::PolychromeSprite>(),
@@ -194,6 +194,10 @@ fn shader_discriminants_match_scene_types() {
         gpui::BackgroundTag::RadialGradient as u32
     );
     assert_eq!(
+        common::BackgroundTag::RadialGradient3 as u32,
+        gpui::BackgroundTag::RadialGradient3 as u32
+    );
+    assert_eq!(
         common::BackgroundTag::AngularGradient as u32,
         gpui::BackgroundTag::AngularGradient as u32
     );
@@ -246,6 +250,10 @@ fn linear_gradients_preserve_native_dithering() {
             },
         ],
         padding: 0,
+        center_x: 0.5,
+        center_y: 0.5,
+        radius_x: 0.5,
+        radius_y: 0.5,
     };
     let bounds = Bounds {
         origin: vec2f(0.0, 0.0),
@@ -295,6 +303,10 @@ fn gradient_paint(tag: common::BackgroundTag, angle: f32, stops: [f32; 2]) -> co
                 },
             ],
             padding: 0,
+            center_x: 0.5,
+            center_y: 0.5,
+            radius_x: 0.5,
+            radius_y: 0.5,
         },
         Bounds {
             origin: vec2f(10.0, 20.0),
@@ -432,4 +444,56 @@ fn non_linear_gradients_preserve_stops_color_space_and_alpha() {
     // First and last colors differ, so the angular gradient deliberately keeps its seam.
     assert!(gradient_ratio(paint, vec2f(109.9, 20.0)) > 0.99);
     assert!(gradient_ratio(paint, vec2f(110.1, 20.0)) < 0.01);
+}
+
+#[test]
+fn three_stop_radial_gradients_reach_each_stop_on_their_ellipse() {
+    use common::*;
+    use wgsl_rs::std::*;
+
+    let grey = |l: f32| Hsla {
+        h: 0.0,
+        s: 0.0,
+        l,
+        a: 1.0,
+    };
+    let background = Background {
+        tag: BackgroundTag::RadialGradient3,
+        color_space: ColorSpace::Srgb,
+        solid: grey(1.0),
+        gradient_angle_or_pattern_height: 1.0,
+        colors: [
+            LinearColorStop {
+                color: grey(0.0),
+                percentage: 0.0,
+            },
+            LinearColorStop {
+                color: grey(0.5),
+                percentage: 0.5,
+            },
+        ],
+        padding: 0,
+        center_x: 0.25,
+        center_y: 0.5,
+        radius_x: 0.5,
+        radius_y: 0.25,
+    };
+    let bounds = Bounds {
+        origin: vec2f(0.0, 0.0),
+        size: vec2f(200.0, 200.0),
+    };
+    let paint = Paint::new(background, bounds);
+    let prepared = prepare_paint(paint);
+    let red_at = |x: f32, y: f32| paint_color(paint, vec2f(x, y), prepared).x;
+    let expected = |l: f32| hsla_to_rgba(grey(l)).x;
+    // Dithering moves a channel by at most two 8-bit steps.
+    let tolerance = 3.0 / 255.0;
+
+    assert!((red_at(50.0, 100.0) - expected(0.0)).abs() < tolerance);
+    // Halfway out along the long axis and along the short one is the middle stop.
+    assert!((red_at(100.0, 100.0) - expected(0.5)).abs() < tolerance);
+    assert!((red_at(50.0, 125.0) - expected(0.5)).abs() < tolerance);
+    // On and past the ellipse is the last stop.
+    assert!((red_at(150.0, 100.0) - expected(1.0)).abs() < tolerance);
+    assert!((red_at(50.0, 160.0) - expected(1.0)).abs() < tolerance);
 }

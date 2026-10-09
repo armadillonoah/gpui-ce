@@ -260,6 +260,9 @@ pub enum BackgroundTag {
     AngularGradient = 5,
     /// A two-stop diamond gradient.
     DiamondGradient = 6,
+    /// A three-stop elliptical radial gradient with its own center and radii. The last
+    /// stop lives in `solid` and `gradient_angle_or_pattern_height`.
+    RadialGradient3 = 7,
 }
 
 /// A color space for color interpolation.
@@ -297,6 +300,12 @@ pub struct Background {
     pub(crate) colors: [LinearColorStop; 2],
     /// Padding for alignment for repr(C) layout.
     pub(crate) padding: u32,
+    /// A three-stop radial gradient's center, normalized to the painted bounds.
+    pub(crate) center_x: f32,
+    pub(crate) center_y: f32,
+    /// A three-stop radial gradient's radii, normalized to the painted bounds.
+    pub(crate) radius_x: f32,
+    pub(crate) radius_y: f32,
 }
 
 impl std::fmt::Debug for Background {
@@ -310,6 +319,17 @@ impl std::fmt::Debug for Background {
                 f,
                 "{:?}({}, {:?}, {:?})",
                 self.tag, self.gradient_angle_or_pattern_height, self.colors[0], self.colors[1]
+            ),
+            BackgroundTag::RadialGradient3 => write!(
+                f,
+                "RadialGradient3(center=({}, {}), radius=({}, {}), {:?}, {:?}, {:?})",
+                self.center_x,
+                self.center_y,
+                self.radius_x,
+                self.radius_y,
+                self.colors[0],
+                self.colors[1],
+                self.last_radial_stop()
             ),
             BackgroundTag::PatternSlash => write!(
                 f,
@@ -335,6 +355,10 @@ impl Default for Background {
             gradient_angle_or_pattern_height: 0.0,
             colors: [LinearColorStop::default(), LinearColorStop::default()],
             padding: 0,
+            center_x: 0.5,
+            center_y: 0.5,
+            radius_x: 0.5,
+            radius_y: 0.5,
         }
     }
 }
@@ -406,6 +430,33 @@ pub fn radial_gradient(
     Background {
         tag: BackgroundTag::RadialGradient,
         ..linear_gradient(0.0, from, to)
+    }
+}
+
+/// Creates a three-stop elliptical radial gradient, interpolated piecewise between the
+/// stops in order, as CSS `radial-gradient(ellipse rx ry at cx cy, ...)` paints it.
+///
+/// `center` is the gradient's center and `radius` its radii, both normalized to the
+/// painted bounds (`0.0` to `1.0`), so a center of `(0.5, 0.5)` and radii of
+/// `(0.5, 0.5)` reach each edge's midpoint as [`radial_gradient`] does. Stop
+/// percentages are fractions of the radius; colors beyond the last stop are clamped.
+pub fn radial_gradient_3(
+    center: (f32, f32),
+    radius: (f32, f32),
+    first: impl Into<LinearColorStop>,
+    middle: impl Into<LinearColorStop>,
+    last: impl Into<LinearColorStop>,
+) -> Background {
+    let last = last.into();
+    Background {
+        tag: BackgroundTag::RadialGradient3,
+        solid: last.color,
+        gradient_angle_or_pattern_height: last.percentage,
+        center_x: center.0,
+        center_y: center.1,
+        radius_x: radius.0,
+        radius_y: radius.1,
+        ..linear_gradient(0.0, first, middle)
     }
 }
 
@@ -491,6 +542,15 @@ pub enum BackgroundKind {
         /// The stops, with `0.0` at the center and `1.0` at the edge midpoints.
         stops: [LinearColorStop; 2],
     },
+    /// A three-stop elliptical gradient with its own center and radii.
+    RadialGradient3 {
+        /// The center, normalized to the painted bounds.
+        center: (f32, f32),
+        /// The radii, normalized to the painted bounds.
+        radius: (f32, f32),
+        /// The stops in order, percentages as fractions of the radius.
+        stops: [LinearColorStop; 3],
+    },
     /// A clockwise angular (conic) gradient centered in the painted bounds.
     AngularGradient {
         /// The starting angle in degrees, `0.0` pointing up, increasing clockwise.
@@ -542,6 +602,11 @@ impl Background {
                 stops: self.colors,
             },
             BackgroundTag::RadialGradient => BackgroundKind::RadialGradient { stops: self.colors },
+            BackgroundTag::RadialGradient3 => BackgroundKind::RadialGradient3 {
+                center: (self.center_x, self.center_y),
+                radius: (self.radius_x, self.radius_y),
+                stops: [self.colors[0], self.colors[1], self.last_radial_stop()],
+            },
             BackgroundTag::AngularGradient => BackgroundKind::AngularGradient {
                 angle: self.gradient_angle_or_pattern_height,
                 stops: self.colors,
@@ -567,6 +632,13 @@ impl Background {
                 color: self.solid.into(),
                 size: self.gradient_angle_or_pattern_height,
             },
+        }
+    }
+
+    fn last_radial_stop(&self) -> LinearColorStop {
+        LinearColorStop {
+            color: self.solid,
+            percentage: self.gradient_angle_or_pattern_height,
         }
     }
 
@@ -603,6 +675,9 @@ impl Background {
             | BackgroundTag::RadialGradient
             | BackgroundTag::AngularGradient
             | BackgroundTag::DiamondGradient => self.colors.iter().all(|c| c.color.a == 0.),
+            BackgroundTag::RadialGradient3 => {
+                self.solid.a == 0. && self.colors.iter().all(|c| c.color.a == 0.)
+            }
             BackgroundTag::PatternSlash => self.solid.a == 0.,
             BackgroundTag::Checkerboard => self.solid.a == 0.,
         }
@@ -688,6 +763,25 @@ mod tests {
             assert!((got_width - width).abs() <= 1.0 / 255.0);
             assert!((got_interval - interval).abs() <= 1.0 / 255.0);
         }
+    }
+
+    #[test]
+    fn three_stop_radial_gradient_keeps_its_ellipse_and_last_stop() {
+        let first = linear_color_stop(rgba(0xff0099ff), 0.0);
+        let middle = linear_color_stop(rgba(0x00ff99cc), 0.35);
+        let last = linear_color_stop(rgba(0x00009980), 0.9);
+        let background = radial_gradient_3((0.25, 0.75), (0.5, 0.8), first, middle, last);
+
+        assert_eq!(
+            background.kind(),
+            BackgroundKind::RadialGradient3 {
+                center: (0.25, 0.75),
+                radius: (0.5, 0.8),
+                stops: [first, middle, last],
+            }
+        );
+        assert!(!background.is_transparent());
+        assert!(background.opacity(0.0).is_transparent());
     }
 
     #[test]
