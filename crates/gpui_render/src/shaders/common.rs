@@ -148,15 +148,27 @@ mod source {
     pub struct ContentMask {
         pub bounds: Bounds,
         pub fade_out: Edges,
+        pub corner_radii: Corners,
     }
 
     impl ContentMask {
         /// The mask's coverage at the given window-space position: 1 inside,
         /// 0 outside, and a linear ramp to 0 across each edge's fade distance.
+        /// A rounded mask's corners are antialiased.
         pub fn alpha(content_mask: ContentMask, position: Vec2f) -> f32 {
             let bounds = content_mask.bounds;
             let fade = content_mask.fade_out;
+            let radii = content_mask.corner_radii;
             let mut alpha = 1.0;
+            if max(
+                max(radii.top_left, radii.top_right),
+                max(radii.bottom_right, radii.bottom_left),
+            ) > 0.0
+            {
+                alpha = antialiased_coverage(rounded_rectangle_signed_distance(
+                    position, bounds, radii,
+                ));
+            }
             if fade.left > 0.0 {
                 alpha *= saturate((position.x - bounds.origin.x) / fade.left);
             }

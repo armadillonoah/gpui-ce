@@ -103,12 +103,12 @@ fn ordinary_vertex_interfaces_stay_within_compact_budgets() {
 #[test]
 fn scene_instance_storage_sizes_are_bounded() {
     for (name, actual, maximum) in [
-        ("Quad", std::mem::size_of::<gpui::Quad>(), 280),
-        ("Shadow", std::mem::size_of::<gpui::Shadow>(), 200),
+        ("Quad", std::mem::size_of::<gpui::Quad>(), 296),
+        ("Shadow", std::mem::size_of::<gpui::Shadow>(), 216),
         (
             "PolychromeSprite",
             std::mem::size_of::<gpui::PolychromeSprite>(),
-            112,
+            128,
         ),
     ] {
         assert!(
@@ -496,4 +496,35 @@ fn three_stop_radial_gradients_reach_each_stop_on_their_ellipse() {
     // On and past the ellipse is the last stop.
     assert!((red_at(150.0, 100.0) - expected(1.0)).abs() < tolerance);
     assert!((red_at(50.0, 160.0) - expected(1.0)).abs() < tolerance);
+}
+
+#[test]
+fn rounded_content_masks_clear_their_corners_and_keep_their_middle() {
+    use common::*;
+    use wgsl_rs::std::*;
+
+    let mask = ContentMask {
+        bounds: Bounds {
+            origin: vec2f(0.0, 0.0),
+            size: vec2f(100.0, 50.0),
+        },
+        fade_out: Edges {
+            top: 0.0,
+            right: 0.0,
+            bottom: 0.0,
+            left: 0.0,
+        },
+        corner_radii: Corners {
+            top_left: 10.0,
+            top_right: 10.0,
+            bottom_right: 10.0,
+            bottom_left: 0.0,
+        },
+    };
+
+    assert_eq!(ContentMask::alpha(mask, vec2f(50.0, 25.0)), 1.0);
+    assert_eq!(ContentMask::alpha(mask, vec2f(0.5, 0.5)), 0.0);
+    assert_eq!(ContentMask::alpha(mask, vec2f(99.5, 49.5)), 0.0);
+    // A square corner stays square.
+    assert_eq!(ContentMask::alpha(mask, vec2f(0.5, 49.5)), 1.0);
 }

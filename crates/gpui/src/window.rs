@@ -1,23 +1,24 @@
 use crate::{
-    Action, AnyDrag, AnyElement, AnyImageCache, AnyTooltip, AnyView, App, AppContext, Arena, Asset,
-    AsyncWindowContext, AtlasTile, AvailableSpace, BackdropFilter, Background, BorderStyle, Bounds,
-    BoxShadow, Capslock, ColorExt, Context, Corners, CursorHideMode, CursorStyle, Decorations,
-    DevicePixels, DispatchActionListener, DispatchNodeId, DispatchTree, DisplayId, Edges, Effect,
-    Entity, EntityId, EventEmitter, FileDropEvent, Filter, FilterBoundary, FontId, Global,
-    GlobalElementId, GlyphId, GlyphRenderMode, GpuSpecs, InputHandler, IntoElement, IsZero,
-    KeyBinding, KeyContext, KeyDownEvent, KeyEvent, Keystroke, KeystrokeEvent, LayoutId, Lerp,
-    LineLayoutIndex, Modifiers, ModifiersChangedEvent, MonochromeSprite, Motion, MouseButton,
-    MouseEvent, MouseMoveEvent, MouseUpEvent, Path, Pixels, PlatformAtlas, PlatformDisplay,
-    PlatformInput, PlatformInputHandler, PlatformWindow, Point, PolychromeSprite, Priority,
-    PromptButton, PromptLevel, Quad, RasterizedGlyphFormat, Render, RenderGlyphParams, RenderImage,
-    RenderImageParams, RenderSvgParams, Replay, ResizeEdge, ResolvedDirection,
-    SMOOTH_SVG_SCALE_FACTOR, SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledFilter, ScaledPixels,
-    Scene, Shadow, SharedString, Size, StrikethroughStyle, Style, SubpixelSprite, SubscriberSet,
-    Subscription, SystemWindowTab, SystemWindowTabController, TabStopMap, TaffyLayoutEngine, Task,
-    TextInputConfiguration, TextInputStateChange, TextRenderingMode, TextStyle,
-    TextStyleRefinement, ThermalState, TransformationMatrix, Transition, TransitionState,
-    Underline, UnderlineStyle, UnicodeBidi, WindowAppearance, WindowBackgroundAppearance,
-    WindowBounds, WindowControls, WindowDecorations, WindowOptions, WindowParams, WindowTextSystem,
+    Action, Anchor, AnyDrag, AnyElement, AnyImageCache, AnyTooltip, AnyView, App, AppContext,
+    Arena, Asset, AsyncWindowContext, AtlasTile, AvailableSpace, BackdropFilter, Background,
+    BorderStyle, Bounds, BoxShadow, Capslock, ColorExt, Context, Corners, CursorHideMode,
+    CursorStyle, Decorations, DevicePixels, DispatchActionListener, DispatchNodeId, DispatchTree,
+    DisplayId, Edges, Effect, Entity, EntityId, EventEmitter, FileDropEvent, Filter,
+    FilterBoundary, FontId, Global, GlobalElementId, GlyphId, GlyphRenderMode, GpuSpecs,
+    InputHandler, IntoElement, IsZero, KeyBinding, KeyContext, KeyDownEvent, KeyEvent, Keystroke,
+    KeystrokeEvent, LayoutId, Lerp, LineLayoutIndex, Modifiers, ModifiersChangedEvent,
+    MonochromeSprite, Motion, MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent, Path, Pixels,
+    PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point,
+    PolychromeSprite, Priority, PromptButton, PromptLevel, Quad, RasterizedGlyphFormat, Render,
+    RenderGlyphParams, RenderImage, RenderImageParams, RenderSvgParams, Replay, ResizeEdge,
+    ResolvedDirection, SMOOTH_SVG_SCALE_FACTOR, SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y,
+    ScaledFilter, ScaledPixels, Scene, Shadow, SharedString, Size, StrikethroughStyle, Style,
+    SubpixelSprite, SubscriberSet, Subscription, SystemWindowTab, SystemWindowTabController,
+    TabStopMap, TaffyLayoutEngine, Task, TextInputConfiguration, TextInputStateChange,
+    TextRenderingMode, TextStyle, TextStyleRefinement, ThermalState, TransformationMatrix,
+    Transition, TransitionState, Underline, UnderlineStyle, UnicodeBidi, WindowAppearance,
+    WindowBackgroundAppearance, WindowBounds, WindowControls, WindowDecorations, WindowOptions,
+    WindowParams, WindowTextSystem,
     gestures::{GestureTuning, RecognizedTouchGesture, TouchGestureRecognizer},
     interactive::TouchEvent,
     point, px, rems, size, transparent_black,
@@ -2110,9 +2111,8 @@ pub struct DispatchEventResult {
 }
 
 /// Indicates which region of the window is visible. Content falling outside of this mask will not be
-/// rendered. Currently, only rectangular content masks are supported, but we give the mask its own type
-/// to leave room to support more complex shapes in the future. Edge fades are evaluated in
-/// window space against these axis-aligned bounds and are not transform-aware.
+/// rendered. A mask is a rectangle, optionally rounded at its corners. Edge fades and corners are
+/// evaluated in window space against these axis-aligned bounds and are not transform-aware.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 #[repr(C)]
 pub struct ContentMask<P: Clone + Debug + Default + PartialEq> {
@@ -2120,6 +2120,12 @@ pub struct ContentMask<P: Clone + Debug + Default + PartialEq> {
     pub bounds: Bounds<P>,
     /// Edge fade distances. A zero distance leaves that edge fully opaque.
     pub fade_out: Edges<P>,
+    /// The radii the mask's corners are rounded by; all zero for a square mask.
+    ///
+    /// They are not zero when a rounded element clips its children (`overflow_hidden` on a
+    /// rounded element). Without them a child painting to the element's inner edge draws a
+    /// square corner in the sliver the element's curve excludes.
+    pub corner_radii: Corners<P>,
 }
 
 impl ContentMask<Pixels> {
@@ -2128,7 +2134,35 @@ impl ContentMask<Pixels> {
         ContentMask {
             bounds: self.bounds.scale(factor),
             fade_out: self.fade_out.scale(factor),
+            corner_radii: self.corner_radii.scale(factor),
         }
+    }
+
+    /// The corner radii of the intersection of two masks.
+    ///
+    /// The intersection of two rounded rectangles is not a rounded rectangle. A corner of the
+    /// result keeps a mask's radius only where that mask's own corner is the result's corner;
+    /// where the result's corner lies inside a mask, that mask's edge is straight there and the
+    /// corner is square. Of two masks sharing the corner, the larger radius wins. So a scroll
+    /// area inside a rounded card is rounded only where it reaches the card's corners.
+    fn intersected_corner_radii(&self, other: &Self, bounds: Bounds<Pixels>) -> Corners<Pixels> {
+        let at = |anchor: Anchor| -> Pixels {
+            let own = |mask: &Self| {
+                if mask.bounds.corner(anchor) == bounds.corner(anchor) {
+                    mask.corner_radii.corner(anchor)
+                } else {
+                    Pixels::ZERO
+                }
+            };
+            own(self).max(own(other))
+        };
+        Corners {
+            top_left: at(Anchor::TopLeft),
+            top_right: at(Anchor::TopRight),
+            bottom_right: at(Anchor::BottomRight),
+            bottom_left: at(Anchor::BottomLeft),
+        }
+        .clamp_radii_for_quad_size(bounds.size)
     }
 
     /// Intersect the content mask with the given content mask.
@@ -2152,8 +2186,10 @@ impl ContentMask<Pixels> {
             }
         }
 
+        let bounds = self.bounds.intersect(&other.bounds);
         ContentMask {
-            bounds: self.bounds.intersect(&other.bounds),
+            corner_radii: self.intersected_corner_radii(other, bounds),
+            bounds,
             fade_out: Edges {
                 top: edge_fade(
                     self.bounds.top(),
@@ -2199,7 +2235,42 @@ mod content_mask_tests {
                 left: px(fade_left),
                 ..Default::default()
             },
+            corner_radii: Corners::default(),
         }
+    }
+
+    fn rounded_card() -> ContentMask<Pixels> {
+        ContentMask {
+            bounds: Bounds::new(point(px(0.), px(0.)), size(px(400.), px(300.))),
+            corner_radii: Corners::all(px(18.)),
+            ..Default::default()
+        }
+    }
+
+    fn square(origin: Point<Pixels>, extent: Size<Pixels>) -> ContentMask<Pixels> {
+        ContentMask {
+            bounds: Bounds::new(origin, extent),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_mask_inside_a_rounded_card_is_square_away_from_the_cards_corners() {
+        let inner = square(point(px(40.), px(0.)), size(px(200.), px(36.)));
+        assert_eq!(
+            inner.intersect(&rounded_card()).corner_radii,
+            Corners::default()
+        );
+    }
+
+    #[test]
+    fn a_mask_sharing_the_cards_corner_keeps_that_corner_round() {
+        let inner = square(point(px(0.), px(0.)), size(px(200.), px(36.)));
+        let radii = inner.intersect(&rounded_card()).corner_radii;
+        assert_eq!(radii.top_left, px(18.));
+        assert_eq!(radii.top_right, px(0.));
+        assert_eq!(radii.bottom_right, px(0.));
+        assert_eq!(radii.bottom_left, px(0.));
     }
 
     #[test]
@@ -3074,6 +3145,8 @@ impl Window {
         ContentMask {
             bounds: self.cover_bounds(mask.bounds),
             fade_out: mask.fade_out.scale(self.scale_factor()),
+            // Unsnapped: radii describe a curve, which the shader antialiases, not an edge.
+            corner_radii: mask.corner_radii.scale(self.scale_factor()),
         }
     }
 
@@ -4679,6 +4752,14 @@ impl Window {
         };
 
         if !quad.background.is_transparent() {
+            self.next_frame.scene.insert_primitive(quad);
+            return;
+        }
+
+        // The strips below are carried by content masks of their own, and a rounded mask's
+        // radii would round each strip's ends, eating the border's corners. A rounded clip is
+        // rare, so such a quad is painted whole instead of split.
+        if quad.content_mask.corner_radii != Corners::default() {
             self.next_frame.scene.insert_primitive(quad);
             return;
         }

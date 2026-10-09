@@ -4985,6 +4985,53 @@ impl ScrollHandle {
 mod tests {
     use super::*;
 
+    /// The chain end to end, asserted on the quads the GPU reads: a rounded element that
+    /// clips hands its children its curve, and a bordered control inside it keeps its own
+    /// corners instead of being split into strips the curve would round away.
+    #[gpui::test]
+    fn children_of_a_rounded_clipping_parent_are_masked_by_its_curve(cx: &mut TestAppContext) {
+        let window = cx.add_empty_window();
+        window.draw(point(px(0.), px(0.)), size(px(400.), px(400.)), |_, _| {
+            div()
+                .size_full()
+                .rounded(px(10.))
+                .overflow_hidden()
+                .child(div().size_full().bg(crate::red()))
+                .child(
+                    div()
+                        .absolute()
+                        .left(px(100.))
+                        .top(px(100.))
+                        .w(px(72.))
+                        .h(px(28.))
+                        .rounded(px(4.))
+                        .border_1()
+                        .border_color(crate::red()),
+                )
+                .into_any_element()
+        });
+
+        let (fill, border, expected) = window.update(|window, _| {
+            let quads = &window.rendered_frame.scene.quads;
+            let fill = quads
+                .iter()
+                .find(|quad| !quad.background.is_transparent())
+                .map(|quad| quad.content_mask.corner_radii.top_left);
+            let border = quads
+                .iter()
+                .filter(|quad| quad.background.is_transparent())
+                .map(|quad| quad.bounds)
+                .collect::<Vec<_>>();
+            (fill, border, px(10.).scale(window.scale_factor()))
+        });
+        assert_eq!(fill, Some(expected));
+        assert_eq!(
+            border.len(),
+            1,
+            "the bordered control was split: {border:?}"
+        );
+    }
+
     #[gpui::test]
     fn inline_div_places_element_children_in_text_flow(cx: &mut TestAppContext) {
         let placed_children = Rc::new(RefCell::new(Vec::new()));
