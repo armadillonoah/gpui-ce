@@ -3,12 +3,16 @@
 mod clipboard;
 mod destination_list;
 mod direct_manipulation;
+// Kept compiled under the `wgpu` feature too: `direct_write` shares its
+// shader/emoji-rasterization internals with `directx_renderer`. When the `wgpu`
+// feature selects the WGPU renderer and the Parley text system, neither the
+// DirectWrite text system, the DirectX devices nor `DirectXRenderer` is ever
+// instantiated.
+#[cfg_attr(feature = "wgpu", allow(dead_code, unfulfilled_lint_expectations))]
 mod direct_write;
 mod directx_atlas;
+#[cfg_attr(feature = "wgpu", allow(dead_code, unfulfilled_lint_expectations))]
 mod directx_devices;
-// Kept compiled under the `wgpu` feature too: `direct_write` shares its
-// shader/emoji-rasterization internals. When the `wgpu` feature selects the
-// WGPU renderer, `DirectXRenderer` is simply never instantiated.
 #[cfg_attr(feature = "wgpu", allow(dead_code, unfulfilled_lint_expectations))]
 mod directx_renderer;
 mod dispatcher;
@@ -27,6 +31,7 @@ mod wrapper;
 
 pub(crate) use clipboard::*;
 pub(crate) use destination_list::*;
+#[cfg_attr(feature = "wgpu", allow(unused_imports))]
 pub(crate) use direct_write::*;
 pub(crate) use directx_atlas::*;
 pub(crate) use directx_devices::*;
