@@ -267,7 +267,7 @@ mod tests {
     use std::sync::Arc;
 
     use gpui::{
-        Bounds, ContentMask, DevicePixels, Point, ScaledPixels, Scene, Size, SurfaceSource,
+        Bounds, ContentMask, Corners, DevicePixels, Point, ScaledPixels, Scene, Size, SurfaceSource,
     };
 
     use super::*;
@@ -338,6 +338,8 @@ mod tests {
                     bounds: bounds(4.0),
                     ..Default::default()
                 },
+                corner_radii: Corners::default(),
+                corner_smoothing: 0.0,
                 source,
             });
         }

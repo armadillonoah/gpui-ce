@@ -494,6 +494,119 @@ mod tests {
         Ok(())
     }
 
+    /// A texture surface with rounded corners leaves the corner pixel to the clear colour
+    /// while its centre still shows the texture; with square corners the same surface
+    /// covers the corner too, so the clip comes from the radii alone.
+    #[cfg(all(
+        feature = "test-support",
+        not(target_family = "wasm"),
+        any(
+            target_os = "linux",
+            target_os = "freebsd",
+            all(target_os = "macos", feature = "custom-gpu")
+        )
+    ))]
+    #[test]
+    fn rounded_texture_surfaces_clip_their_corners() -> anyhow::Result<()> {
+        use gpui::{Corners, PaintSurface, SurfaceSource};
+        use std::sync::Arc;
+
+        let context = WgpuContext::new_headless(None)?;
+        let size = Size {
+            width: DevicePixels(16),
+            height: DevicePixels(16),
+        };
+        let mut renderer = WgpuRenderer::new_headless(&context, size)?;
+
+        let texture_size = wgpu::Extent3d {
+            width: 4,
+            height: 4,
+            depth_or_array_layers: 1,
+        };
+        let texture = renderer
+            .resources()
+            .device
+            .create_texture(&wgpu::TextureDescriptor {
+                label: Some("rounded surface test texture"),
+                size: texture_size,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+        renderer.resources().queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &[255u8; 4 * 4 * 4],
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(16),
+                rows_per_image: Some(4),
+            },
+            texture_size,
+        );
+        let texture: Arc<dyn std::any::Any + Send + Sync> = Arc::new(texture);
+
+        let bounds = Bounds {
+            origin: Point {
+                x: ScaledPixels(0.0),
+                y: ScaledPixels(0.0),
+            },
+            size: Size {
+                width: ScaledPixels(16.0),
+                height: ScaledPixels(16.0),
+            },
+        };
+        let mut render = |corner_radii: Corners<ScaledPixels>| -> anyhow::Result<_> {
+            let mut scene = Scene::default();
+            scene.insert_primitive(PaintSurface {
+                order: 0,
+                bounds,
+                content_mask: gpui::ContentMask {
+                    bounds,
+                    ..Default::default()
+                },
+                corner_radii,
+                corner_smoothing: 0.0,
+                source: SurfaceSource::Texture {
+                    texture: texture.clone(),
+                    size: Size {
+                        width: DevicePixels(4),
+                        height: DevicePixels(4),
+                    },
+                },
+            });
+            scene.finish();
+            renderer.render_to_image(&scene)
+        };
+
+        let rounded = render(Corners::all(ScaledPixels(8.0)))?;
+        assert_eq!(
+            rounded.get_pixel(8, 8).0,
+            [255, 255, 255, 255],
+            "the centre of a rounded surface must still show the texture"
+        );
+        assert_eq!(
+            rounded.get_pixel(0, 0).0,
+            [0, 0, 0, 255],
+            "the corner of a rounded surface must be left to the clear colour"
+        );
+
+        let square = render(Corners::default())?;
+        assert_eq!(
+            square.get_pixel(0, 0).0,
+            [255, 255, 255, 255],
+            "a surface without radii must still cover its corner"
+        );
+        Ok(())
+    }
+
     #[cfg(all(feature = "test-support", not(target_family = "wasm")))]
     #[test]
     fn configurable_dashes_reach_both_wgpu_quad_pipelines() -> anyhow::Result<()> {

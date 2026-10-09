@@ -1127,6 +1127,8 @@ pub struct PaintSurface {
     pub order: DrawOrder,
     pub bounds: Bounds<ScaledPixels>,
     pub content_mask: ContentMask<ScaledPixels>,
+    pub corner_radii: Corners<ScaledPixels>,
+    pub corner_smoothing: f32,
     pub source: crate::SurfaceSource,
 }
 
@@ -1496,6 +1498,8 @@ mod tests {
             order: 0,
             bounds: full_bounds(),
             content_mask: mask(),
+            corner_radii: Corners::default(),
+            corner_smoothing: 0.0,
             source: SurfaceSource::Unsupported(Size::default()),
         }
     }

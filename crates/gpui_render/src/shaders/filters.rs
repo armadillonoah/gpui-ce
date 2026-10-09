@@ -1,6 +1,7 @@
 #[wgsl_rs::wgsl]
 pub mod surface {
     use super::super::common::*;
+    use super::super::corner_smoothing::*;
     use wgsl_rs::std::*;
 
     #[repr(C)]
@@ -8,14 +9,11 @@ pub mod surface {
     pub struct SurfaceUniforms {
         pub bounds: Bounds,
         pub content_mask: ContentMask,
+        pub corner_radii: Corners,
         pub color_format: SurfaceColorFormat,
         pub opacity: f32,
+        pub corner_smoothing: f32,
         pub padding0: u32,
-        pub padding1: u32,
-        pub padding2: u32,
-        pub padding3: u32,
-        pub padding4: u32,
-        pub padding5: u32,
     }
     uniform!(group(1), binding(0), SURFACE_LOCALS: SurfaceUniforms);
     texture!(group(1), binding(1), SURFACE_TEXTURE: Texture2D<f32>);
@@ -47,20 +45,42 @@ pub mod surface {
         pub position: Vec4f,
         #[location(0)]
         pub texture_position: Vec2f,
+        #[location(1)]
+        #[interpolate(flat)]
+        pub horizontal_corner_reaches: Vec4f,
+        #[location(2)]
+        #[interpolate(flat)]
+        pub vertical_corner_reaches: Vec4f,
         #[location(3)]
         pub clip_distances: Vec4f,
+        #[location(4)]
+        #[interpolate(flat)]
+        pub smoothing_factors: Vec4f,
+        #[location(5)]
+        #[interpolate(flat)]
+        pub superellipse_power: f32,
     }
 
     #[vertex]
     pub fn vertex_surface(#[builtin(vertex_index)] vertex_id: u32) -> SurfaceVarying {
-        let vertex = rectangle_vertex(vertex_id, get!(SURFACE_LOCALS).bounds);
+        let locals = get!(SURFACE_LOCALS);
+        let vertex = rectangle_vertex(vertex_id, locals.bounds);
+        // Prepared once per surface, exactly as the smoothed sprite and quad
+        // pipelines do, so a surface's corners match the quads around it.
+        let prepared = prepare_corners(
+            locals.bounds.size,
+            locals.corner_radii,
+            locals.corner_smoothing,
+            true,
+        );
         SurfaceVarying {
             position: vertex.clip_position,
             texture_position: vertex.unit_position,
-            clip_distances: clip_distances(
-                vertex.viewport_position,
-                get!(SURFACE_LOCALS).content_mask.bounds,
-            ),
+            horizontal_corner_reaches: prepared.horizontal_reaches,
+            vertical_corner_reaches: prepared.vertical_reaches,
+            clip_distances: clip_distances(vertex.viewport_position, locals.content_mask.bounds),
+            smoothing_factors: prepared.smoothing_factors,
+            superellipse_power: prepared.superellipse_power,
         }
     }
 
@@ -70,17 +90,31 @@ pub mod surface {
             return transparent();
         }
         let locals = get!(SURFACE_LOCALS);
+        // Zero radii make the distance field a plain rectangle whose coverage is 1 at
+        // every pixel centre inside the snapped bounds, so square surfaces are unchanged.
+        let coverage = antialiased_coverage(prepared_corner_signed_distance(
+            input.position.xy(),
+            locals.bounds,
+            locals.corner_radii,
+            locals.corner_smoothing,
+            PreparedCorners {
+                horizontal_reaches: input.horizontal_corner_reaches,
+                vertical_reaches: input.vertical_corner_reaches,
+                smoothing_factors: input.smoothing_factors,
+                superellipse_power: input.superellipse_power,
+            },
+        ));
         let fade = ContentMask::alpha(locals.content_mask, input.position.xy());
+        let factor = locals.opacity * coverage * fade;
         if locals.color_format == SurfaceColorFormat::Yuv {
-            return sample_yuv_surface(input.texture_position) * locals.opacity * fade;
+            return sample_yuv_surface(input.texture_position) * factor;
         }
         texture_sample_level(
             SURFACE_TEXTURE,
             SURFACE_SAMPLER,
             input.texture_position,
             0.0,
-        ) * locals.opacity
-            * fade
+        ) * factor
     }
 }
 
