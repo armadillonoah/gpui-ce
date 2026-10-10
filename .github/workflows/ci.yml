@@ -5,6 +5,7 @@ permissions:
   contents: read
 
 on:
+  workflow_dispatch:
   push:
     branches: [main, "v[0-9]+.[0-9]+.x"]
   pull_request:
@@ -32,6 +33,11 @@ jobs:
           fetch-depth: ${{ github.ref == 'refs/heads/main' && 2 || 350 }}
       - id: filter
         run: |
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            echo "run_tests=true" >> "$GITHUB_OUTPUT"
+            echo "run_style=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           if [ -z "$GITHUB_BASE_REF" ]; then
             COMPARE_REV="$(git rev-parse HEAD~1)"
           else
