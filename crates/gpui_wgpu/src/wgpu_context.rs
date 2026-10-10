@@ -502,6 +502,15 @@ pub struct WgpuDeviceRequirements {
     /// optional experimental feature is left out rather than failing device
     /// creation.
     pub experimental_features: wgpu::ExperimentalFeatures,
+    /// Preferred window presentation mode, falling back to FIFO when the
+    /// surface doesn't support it. `Immediate` presents without waiting for
+    /// vsync, which on a composited desktop lowers draw-to-scanout latency
+    /// (measured 40 ms to 20 ms in a window on a 120 Hz Mac) without tearing.
+    pub preferred_present_mode: Option<wgpu::PresentMode>,
+    /// How many frames may be queued ahead of the one being drawn
+    /// (`wgpu::SurfaceConfiguration::desired_maximum_frame_latency`); gpui's
+    /// default is 2. Lower trades throughput for latency.
+    pub desired_maximum_frame_latency: Option<u32>,
 }
 
 /// The features to request: gpui's own, the application's required ones, and

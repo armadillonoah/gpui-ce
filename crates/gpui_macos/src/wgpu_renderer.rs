@@ -51,7 +51,14 @@ impl MacWgpuRenderer {
                 height: DevicePixels(bounds.height.max(1.0) as i32),
             },
             transparent,
-            preferred_present_mode: None,
+            preferred_present_mode: context
+                .requirements
+                .as_ref()
+                .and_then(|requirements| requirements.preferred_present_mode),
+            desired_maximum_frame_latency: context
+                .requirements
+                .as_ref()
+                .and_then(|requirements| requirements.desired_maximum_frame_latency),
         };
         let renderer =
             WgpuRenderer::new_for_metal_layer(context.gpu, &layer, config, context.requirements)?;

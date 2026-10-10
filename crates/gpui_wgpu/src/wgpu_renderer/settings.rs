@@ -5,6 +5,8 @@ pub struct WgpuSurfaceConfig {
     pub transparent: bool,
     /// Preferred presentation mode, falling back to FIFO when unsupported.
     pub preferred_present_mode: Option<wgpu::PresentMode>,
+    /// Frames queued ahead of the one being drawn; `None` keeps gpui's default of 2.
+    pub desired_maximum_frame_latency: Option<u32>,
 }
 
 /// Physical order of the color components in an LCD subpixel layout.

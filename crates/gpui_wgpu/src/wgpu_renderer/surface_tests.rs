@@ -118,6 +118,7 @@ fn failed_frames_release_surface_images() {
             },
             transparent: false,
             preferred_present_mode: None,
+            desired_maximum_frame_latency: None,
         },
         None,
         None,

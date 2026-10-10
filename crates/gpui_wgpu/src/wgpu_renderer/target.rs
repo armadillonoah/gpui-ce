@@ -65,6 +65,11 @@ impl RenderTarget {
                     wgpu::PresentMode::Fifo,
                 )
             };
+        log::info!(
+            "gpui wgpu surface: present mode {:?}, frame latency {}",
+            present_mode,
+            requested.desired_maximum_frame_latency.unwrap_or(2)
+        );
         let maximum_dimension = device.limits().max_texture_dimension_2d;
         let (width, height) = clamped_size(requested.size, maximum_dimension);
         let alpha_mode = if requested.transparent {
@@ -79,7 +84,7 @@ impl RenderTarget {
                 width,
                 height,
                 present_mode,
-                desired_maximum_frame_latency: 2,
+                desired_maximum_frame_latency: requested.desired_maximum_frame_latency.unwrap_or(2),
                 alpha_mode,
                 view_formats: Vec::new(),
             },
@@ -133,6 +138,9 @@ impl RenderTarget {
             supported_present_modes,
             self.config.present_mode,
         );
+        if let Some(latency) = requested.desired_maximum_frame_latency {
+            self.config.desired_maximum_frame_latency = latency;
+        }
         self.set_transparent(requested.transparent)
     }
 
@@ -142,6 +150,7 @@ impl RenderTarget {
             size: self.viewport_size(),
             transparent: self.config.alpha_mode != wgpu::CompositeAlphaMode::Opaque,
             preferred_present_mode: Some(self.config.present_mode),
+            desired_maximum_frame_latency: Some(self.config.desired_maximum_frame_latency),
         }
     }
 
