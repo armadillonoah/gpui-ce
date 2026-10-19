@@ -81,6 +81,7 @@ impl WindowsWgpuRenderer {
                 size,
                 transparent: false,
                 preferred_present_mode: None,
+                desired_maximum_frame_latency: None,
             },
             context.requirements(),
         )?;
