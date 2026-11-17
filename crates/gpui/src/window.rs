@@ -15,10 +15,10 @@ use crate::{
     ScaledFilter, ScaledPixels, Scene, Shadow, SharedString, Size, StrikethroughStyle, Style,
     SubpixelSprite, SubscriberSet, Subscription, SystemWindowTab, SystemWindowTabController,
     TabStopMap, TaffyLayoutEngine, Task, TextInputConfiguration, TextInputStateChange,
-    TextRenderingMode, TextStyle, TextStyleRefinement, ThermalState, TransformationMatrix,
-    Transition, TransitionState, Underline, UnderlineStyle, UnicodeBidi, WindowAppearance,
-    WindowBackgroundAppearance, WindowBounds, WindowControls, WindowDecorations, WindowOptions,
-    WindowParams, WindowTextSystem,
+    TextRenderingMode, TextStyle, TextStyleRefinement, ThermalState, Transformation,
+    TransformationMatrix, Transition, TransitionState, Underline, UnderlineStyle, UnicodeBidi,
+    WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControls, WindowDecorations,
+    WindowOptions, WindowParams, WindowTextSystem,
     gestures::{GestureTuning, RecognizedTouchGesture, TouchGestureRecognizer},
     interactive::TouchEvent,
     point, px, rems, size, transparent_black,
@@ -1277,6 +1277,9 @@ pub struct Window {
     /// Inset transitions use these bounds to resolve `auto` from the child's rendered position.
     style_transition_containing_bounds: Option<Bounds<Pixels>>,
     pub(crate) element_opacity: f32,
+    /// Applied to every glyph painted while it is set; see
+    /// [`Window::with_text_transformation`].
+    pub(crate) text_transformation: TransformationMatrix,
     pub(crate) content_mask_stack: Vec<ContentMask<Pixels>>,
     pub(crate) requested_autoscroll: Option<Bounds<Pixels>>,
     /// The [`TextInputConfiguration`] most recently forwarded to the platform
@@ -2032,6 +2035,7 @@ impl Window {
             style_transition_containing_bounds: None,
             content_mask_stack: Vec::new(),
             element_opacity: 1.0,
+            text_transformation: TransformationMatrix::unit(),
             requested_autoscroll: None,
             last_text_input_configuration: None,
             focused_text_input_active: false,
@@ -4054,6 +4058,36 @@ impl Window {
         result
     }
 
+    /// Paints the text drawn inside `f` rotated, scaled or moved by `transformation`
+    /// about `center`, for sideways axis titles and the like. Nested calls compose,
+    /// the inner transformation applying first.
+    ///
+    /// It applies to glyphs only: whatever paints them inside `f`
+    /// ([`ShapedLine::paint`](crate::ShapedLine::paint),
+    /// [`WrappedLine::paint`](crate::WrappedLine::paint), [`Window::paint_glyph`]) is
+    /// transformed, while underlines, strikethroughs, text backgrounds and color
+    /// emoji are painted where they would be without it. Layout is not affected
+    /// either, so size the element for the transformed text yourself. Transformed
+    /// glyphs are always grayscale-antialiased: subpixel antialiasing assumes the
+    /// glyph sits upright on the pixel grid.
+    ///
+    /// This method should only be called as part of the paint phase of element drawing.
+    pub fn with_text_transformation<R>(
+        &mut self,
+        transformation: Transformation,
+        center: Point<Pixels>,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> R {
+        self.invalidator.debug_assert_paint();
+
+        let previous = self.text_transformation;
+        self.text_transformation =
+            previous.compose(transformation.into_matrix(center, self.scale_factor()));
+        let result = f(self);
+        self.text_transformation = previous;
+        result
+    }
+
     /// Perform prepaint on child elements in a "retryable" manner, so that any side effects
     /// of prepaints can be discarded before prepainting again. This is used to support autoscroll
     /// where we need to prepaint children to detect the autoscroll bounds, then adjust the
@@ -4920,11 +4954,14 @@ impl Window {
         let glyph_origin = origin.scale(scale_factor);
 
         let (integer_origin, subpixel_variant) = quantize_glyph_origin(glyph_origin);
-        let requested_mode = if self.should_use_subpixel_rendering(font_id, font_size) {
-            GlyphRenderMode::Subpixel
-        } else {
-            GlyphRenderMode::Grayscale
-        };
+        // Subpixel antialiasing only makes sense for an upright glyph.
+        let transformed = self.text_transformation != TransformationMatrix::unit();
+        let requested_mode =
+            if !transformed && self.should_use_subpixel_rendering(font_id, font_size) {
+                GlyphRenderMode::Subpixel
+            } else {
+                GlyphRenderMode::Grayscale
+            };
         let raster_style =
             self.text_system()
                 .prepare_raster_style(font_id, glyph_id, color, requested_mode);
@@ -4971,7 +5008,7 @@ impl Window {
                     content_mask,
                     color: mask_color.opacity(opacity).into(),
                     tile,
-                    transformation: TransformationMatrix::unit(),
+                    transformation: self.text_transformation,
                 });
             }
             RasterizedGlyphFormat::BgraSubpixelMask => {
@@ -4982,7 +5019,7 @@ impl Window {
                     content_mask,
                     color: mask_color.opacity(opacity).into(),
                     tile,
-                    transformation: TransformationMatrix::unit(),
+                    transformation: self.text_transformation,
                 });
             }
             RasterizedGlyphFormat::BgraColor => {
@@ -8350,6 +8387,91 @@ mod tests {
         fn layout_inline(&self, request: InlineLayoutRequest<'_>) -> InlineLayout {
             PlatformTextSystem::layout_inline(&TestTextSystem, request)
         }
+    }
+
+    /// Paints the same alpha-mask glyph twice: upright, then a quarter turn about
+    /// (20, 20) with a nested no-op transformation inside it.
+    struct TransformedTextView;
+
+    const TEXT_TURN: f32 = -std::f32::consts::FRAC_PI_2;
+
+    impl Render for TransformedTextView {
+        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+            canvas(
+                |_, _, _| (),
+                move |_, _, window, _| {
+                    let color = hsla(0.6, 0.7, 0.4, 1.0);
+                    let paint = |window: &mut Window| {
+                        window
+                            .paint_glyph(
+                                point(px(5.0), px(10.0)),
+                                FontId(7),
+                                GlyphId(1),
+                                px(16.0),
+                                color,
+                            )
+                            .unwrap();
+                    };
+                    paint(window);
+                    window.with_text_transformation(
+                        Transformation::rotate(crate::radians(TEXT_TURN)),
+                        point(px(20.0), px(20.0)),
+                        |window| {
+                            window.with_text_transformation(
+                                Transformation::scale(size(1.0, 1.0)),
+                                point(px(3.0), px(4.0)),
+                                paint,
+                            );
+                        },
+                    );
+                    assert_eq!(window.text_transformation, TransformationMatrix::unit());
+                },
+            )
+            .size_full()
+        }
+    }
+
+    #[test]
+    fn text_transformation_applies_to_glyphs_painted_inside_it() {
+        let text_system = Arc::new(RasterFormatTextSystem::default());
+        let mut app = TestApp::with_text_system(text_system.clone());
+        let mut test_window = app.open_window(|_, _| TransformedTextView);
+        test_window.draw();
+
+        test_window.update(|_, window, _| {
+            let center = point(px(20.0), px(20.0)).scale(window.scale_factor());
+            let expected = TransformationMatrix::unit()
+                .translate(center)
+                .rotate(crate::radians(TEXT_TURN))
+                .translate(center.map(|c| ScaledPixels(-c.0)));
+            let sprites = &window.rendered_frame.scene.monochrome_sprites;
+            let transformations: Vec<_> = sprites.iter().map(|s| s.transformation).collect();
+
+            assert_eq!(sprites.len(), 2);
+            assert!(transformations.contains(&TransformationMatrix::unit()));
+            assert!(
+                transformations.iter().any(|t| {
+                    t.rotation_scale
+                        .iter()
+                        .flatten()
+                        .chain(t.translation.iter())
+                        .zip(
+                            expected
+                                .rotation_scale
+                                .iter()
+                                .flatten()
+                                .chain(expected.translation.iter()),
+                        )
+                        .all(|(a, b)| (a - b).abs() < 1e-3)
+                        && *t != TransformationMatrix::unit()
+                }),
+                "{transformations:?} has no {expected:?}"
+            );
+            // Both are the same glyph at the same spot; only the transformation differs.
+            assert_eq!(sprites[0].bounds, sprites[1].bounds);
+            // Transformed text is never subpixel-antialiased.
+            assert!(window.rendered_frame.scene.subpixel_sprites.is_empty());
+        });
     }
 
     struct RasterFormatView;
