@@ -1882,6 +1882,9 @@ impl App {
                 for release_callback in self.release_listeners.remove(&entity_id) {
                     release_callback(entity.as_mut(), self);
                 }
+                drop(entity);
+                #[cfg(all(feature = "hot-patching", debug_assertions))]
+                self.entities.forget_live_type(entity_id);
             }
         }
     }

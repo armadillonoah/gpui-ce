@@ -199,6 +199,13 @@ impl EntityMap {
         self.accessed_entities.get_mut().clear();
     }
 
+    /// Stops counting a dropped entity in [`Self::live_entities_of`]. Called once its release
+    /// callbacks and destructor have run, so a callback never sees its own type counted out.
+    #[cfg(all(feature = "hot-patching", debug_assertions))]
+    pub fn forget_live_type(&mut self, entity_id: EntityId) {
+        self.live_types.remove(&entity_id);
+    }
+
     pub fn take_dropped(&mut self) -> Vec<(EntityId, Box<dyn Any>)> {
         let mut ref_counts = &mut *self.ref_counts.write();
         let dropped_entity_ids = ref_counts.dropped_entity_ids.drain(..);
@@ -213,8 +220,6 @@ impl EntityMap {
                     "dropped an entity that was referenced"
                 );
                 accessed_entities.remove(&entity_id);
-                #[cfg(all(feature = "hot-patching", debug_assertions))]
-                self.live_types.remove(&entity_id);
                 // If the EntityId was allocated with `Context::reserve`,
                 // the entity may not have been inserted.
                 Some((entity_id, self.entities.remove(entity_id)?))
