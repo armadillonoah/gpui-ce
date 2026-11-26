@@ -21,6 +21,8 @@ default = ["font-kit", "wayland", "x11", "windows-manifest"]
 # Enables the opt-in custom WGPU control API on platforms that support shared
 # texture surfaces.
 custom-gpu = []
+# A window's current frame read back as an image (Window::render_to_image), outside tests.
+frame-capture = []
 wgpu-surfaces = []
 test-support = [
   "leak-detection",

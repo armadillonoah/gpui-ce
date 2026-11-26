@@ -26,6 +26,8 @@ test-support = [
   "gpui_macos/test-support",
   "gpui_windows/test-support",
 ]
+# A window's current frame read back as an image, outside tests.
+frame-capture = ["gpui/frame-capture", "gpui_windows/frame-capture"]
 screen-capture = [
   "gpui/screen-capture",
   "gpui_macos/screen-capture",
