@@ -47,7 +47,7 @@ Application::new().with_manual_hot_patches()
 ```
 
 GPUI then does not connect. The application connects with
-`dioxus_devtools::connect_subsecond`, and applies each patch with
+`dioxus_devtools::connect_at` and its own message handler, and applies each patch with
 `subsecond::apply_patch` on the main thread when it is ready. Windows still
 redraw after each patch.
 
