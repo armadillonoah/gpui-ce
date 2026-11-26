@@ -235,6 +235,21 @@ impl Application {
         self
     }
 
+    /// Leaves taking hot patches to the application. By default GPUI connects to the `dx`
+    /// development server and applies every patch the moment it arrives, off the main thread.
+    /// An application that must do something first, such as dropping every view whose type the
+    /// patch changed, connects itself and applies each patch with `subsecond::apply_patch` on
+    /// the main thread when it is ready. Windows still redraw after each patch is applied.
+    #[cfg(all(
+        feature = "hot-patching",
+        debug_assertions,
+        not(target_family = "wasm")
+    ))]
+    pub fn with_manual_hot_patches(self) -> Self {
+        self.0.borrow_mut().manual_hot_patches = true;
+        self
+    }
+
     /// Configures when the application should automatically quit.
     /// By default, [`QuitMode::Default`] is used.
     pub fn with_quit_mode(self, mode: QuitMode) -> Self {
@@ -275,7 +290,9 @@ impl Application {
             debug_assertions,
             not(target_family = "wasm")
         ))]
-        dioxus_devtools::connect_subsecond();
+        if !self.0.borrow().manual_hot_patches {
+            dioxus_devtools::connect_subsecond();
+        }
 
         let this = self.0.clone();
         let platform = self.0.borrow().platform.clone();
@@ -823,6 +840,14 @@ pub struct App {
     pending_updates: usize,
     quit_mode: QuitMode,
     quitting: bool,
+    /// Whether the application takes hot patches itself rather than GPUI applying each one as it
+    /// arrives. See [`Application::with_manual_hot_patches`].
+    #[cfg(all(
+        feature = "hot-patching",
+        debug_assertions,
+        not(target_family = "wasm")
+    ))]
+    manual_hot_patches: bool,
 
     // We need to ensure the leak detector drops last, after all tasks, callbacks and things have been dropped.
     // Otherwise it may report false positives.
@@ -916,6 +941,12 @@ impl App {
                 inspector_element_registry: InspectorElementRegistry::default(),
                 quit_mode: QuitMode::default(),
                 quitting: false,
+                #[cfg(all(
+                    feature = "hot-patching",
+                    debug_assertions,
+                    not(target_family = "wasm")
+                ))]
+                manual_hot_patches: false,
                 cursor_hide_mode: CursorHideMode::default(),
                 reduce_motion: false,
                 synced_animation_epoch,
@@ -1124,6 +1155,14 @@ impl App {
             self.reduce_motion = reduce_motion;
             self.refresh_windows();
         }
+    }
+
+    /// How many live entities have a type whose path starts with `prefix`, such as
+    /// `"module_plater::"`: what a development build checks is zero before it applies a patch
+    /// that changed those types. Development builds with `hot-patching` only.
+    #[cfg(all(feature = "hot-patching", debug_assertions))]
+    pub fn live_entities_of(&self, prefix: &str) -> usize {
+        self.entities.live_entities_of(prefix)
     }
 
     /// Schedules all windows in the application to be redrawn. This can be called
@@ -1843,6 +1882,9 @@ impl App {
                 for release_callback in self.release_listeners.remove(&entity_id) {
                     release_callback(entity.as_mut(), self);
                 }
+                drop(entity);
+                #[cfg(all(feature = "hot-patching", debug_assertions))]
+                self.entities.forget_live_type(entity_id);
             }
         }
     }

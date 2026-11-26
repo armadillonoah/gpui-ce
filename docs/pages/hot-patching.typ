@@ -34,6 +34,28 @@ existing window without starting a new process. The
 #link("https://github.com/gpui-ce/gpui-ce/tree/main/crates/gpui/examples")[repository examples]
 can provide starting code for a separate Cargo application.
 
+== Applying patches yourself
+
+By default GPUI connects to the Dioxus CLI and applies each patch the moment it
+arrives. A patch that changes the fields of a view's type is only safe once
+every entity of that type has been dropped, since old and new code disagree on
+its layout. An application that rebuilds such views first can take patches
+itself:
+
+```rust
+Application::new().with_manual_hot_patches()
+```
+
+GPUI then does not connect. The application connects with
+`dioxus_devtools::connect_at` and its own message handler, and applies each patch with
+`subsecond::apply_patch` on the main thread when it is ready. Windows still
+redraw after each patch.
+
+`App::live_entities_of(prefix)` counts the live entities whose type path starts
+with `prefix`, such as `"my_crate::"`, so the application can check that none
+of the affected views is left before it applies the patch. Both calls exist
+only in debug builds with the `hot-patching` feature.
+
 == Limitations
 
 This feature is experimental. A patch can fail or crash the application. Keep

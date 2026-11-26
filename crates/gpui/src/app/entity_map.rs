@@ -57,6 +57,10 @@ pub(crate) struct EntityMap {
     entities: SecondaryMap<EntityId, Box<dyn Any>>,
     pub accessed_entities: RefCell<FxHashSet<EntityId>>,
     ref_counts: Arc<RwLock<EntityRefCounts>>,
+    /// The type of every live entity, by name, for a development build that has to know none
+    /// of a module's entities is left before a patch changes their layout.
+    #[cfg(all(feature = "hot-patching", debug_assertions))]
+    live_types: collections::FxHashMap<EntityId, &'static str>,
 }
 
 #[doc(hidden)]
@@ -81,7 +85,19 @@ impl EntityMap {
                     entity_handles: HashMap::default(),
                 },
             })),
+            #[cfg(all(feature = "hot-patching", debug_assertions))]
+            live_types: collections::FxHashMap::default(),
         }
+    }
+
+    /// How many live entities have a type whose path starts with `prefix`, such as
+    /// `"module_plater::"`. Development builds with `hot-patching` only.
+    #[cfg(all(feature = "hot-patching", debug_assertions))]
+    pub fn live_entities_of(&self, prefix: &str) -> usize {
+        self.live_types
+            .values()
+            .filter(|name| name.starts_with(prefix))
+            .count()
     }
 
     #[doc(hidden)]
@@ -125,6 +141,8 @@ impl EntityMap {
         accessed_entities.insert(slot.entity_id);
 
         let handle = slot.0;
+        #[cfg(all(feature = "hot-patching", debug_assertions))]
+        self.live_types.insert(handle.entity_id, type_name::<T>());
         self.entities.insert(handle.entity_id, Box::new(entity));
         handle
     }
@@ -179,6 +197,13 @@ impl EntityMap {
 
     pub fn clear_accessed(&mut self) {
         self.accessed_entities.get_mut().clear();
+    }
+
+    /// Stops counting a dropped entity in [`Self::live_entities_of`]. Called once its release
+    /// callbacks and destructor have run, so a callback never sees its own type counted out.
+    #[cfg(all(feature = "hot-patching", debug_assertions))]
+    pub fn forget_live_type(&mut self, entity_id: EntityId) {
+        self.live_types.remove(&entity_id);
     }
 
     pub fn take_dropped(&mut self) -> Vec<(EntityId, Box<dyn Any>)> {
