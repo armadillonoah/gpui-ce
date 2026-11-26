@@ -240,7 +240,11 @@ impl Application {
     /// An application that must do something first, such as dropping every view whose type the
     /// patch changed, connects itself and applies each patch with `subsecond::apply_patch` on
     /// the main thread when it is ready. Windows still redraw after each patch is applied.
-    #[cfg(all(feature = "hot-patching", debug_assertions, not(target_family = "wasm")))]
+    #[cfg(all(
+        feature = "hot-patching",
+        debug_assertions,
+        not(target_family = "wasm")
+    ))]
     pub fn with_manual_hot_patches(self) -> Self {
         self.0.borrow_mut().manual_hot_patches = true;
         self
@@ -838,7 +842,11 @@ pub struct App {
     quitting: bool,
     /// Whether the application takes hot patches itself rather than GPUI applying each one as it
     /// arrives. See [`Application::with_manual_hot_patches`].
-    #[cfg(all(feature = "hot-patching", debug_assertions, not(target_family = "wasm")))]
+    #[cfg(all(
+        feature = "hot-patching",
+        debug_assertions,
+        not(target_family = "wasm")
+    ))]
     manual_hot_patches: bool,
 
     // We need to ensure the leak detector drops last, after all tasks, callbacks and things have been dropped.
@@ -933,7 +941,11 @@ impl App {
                 inspector_element_registry: InspectorElementRegistry::default(),
                 quit_mode: QuitMode::default(),
                 quitting: false,
-                #[cfg(all(feature = "hot-patching", debug_assertions, not(target_family = "wasm")))]
+                #[cfg(all(
+                    feature = "hot-patching",
+                    debug_assertions,
+                    not(target_family = "wasm")
+                ))]
                 manual_hot_patches: false,
                 cursor_hide_mode: CursorHideMode::default(),
                 reduce_motion: false,
