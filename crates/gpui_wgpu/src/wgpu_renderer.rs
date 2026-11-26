@@ -18,7 +18,7 @@ mod buffers;
 mod drawing;
 mod filters;
 mod frame;
-#[cfg(all(feature = "test-support", not(target_family = "wasm")))]
+#[cfg(all(feature = "frame-capture", not(target_family = "wasm")))]
 mod headless;
 mod path_types;
 mod pipelines;
@@ -261,7 +261,7 @@ impl WgpuRenderer {
         frame::render_to_view(self, scene, frame_view, None).is_some()
     }
 
-    #[cfg(all(feature = "test-support", not(target_family = "wasm")))]
+    #[cfg(all(feature = "frame-capture", not(target_family = "wasm")))]
     fn render_to_view_with_readback(
         &mut self,
         scene: &Scene,

@@ -788,7 +788,7 @@ impl DirectXRenderer {
         Ok(())
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(any(test, feature = "test-support", feature = "frame-capture"))]
     pub(crate) fn render_to_image(
         &mut self,
         scene: &Scene,

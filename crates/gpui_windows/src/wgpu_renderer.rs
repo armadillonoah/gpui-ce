@@ -179,7 +179,7 @@ impl WindowsWgpuRenderer {
         self.renderer.gpu_context_info()
     }
 
-    #[cfg(feature = "test-support")]
+    #[cfg(any(feature = "test-support", feature = "frame-capture"))]
     pub fn render_to_image(
         &mut self,
         scene: &Scene,
@@ -188,15 +188,18 @@ impl WindowsWgpuRenderer {
         self.renderer.render_to_image(scene)
     }
 
-    // WGPU's offscreen rendering needs gpui_wgpu's test-support, which the
-    // `test-support` feature enables.
-    #[cfg(all(test, not(feature = "test-support")))]
+    // WGPU's offscreen rendering needs gpui_wgpu's frame-capture, which the
+    // `test-support` and `frame-capture` features enable.
+    #[cfg(all(
+        test,
+        not(any(feature = "test-support", feature = "frame-capture"))
+    ))]
     pub fn render_to_image(
         &mut self,
         _scene: &Scene,
         _background_appearance: WindowBackgroundAppearance,
     ) -> anyhow::Result<image::RgbaImage> {
-        anyhow::bail!("rendering to an image needs the test-support feature")
+        anyhow::bail!("rendering to an image needs the test-support or frame-capture feature")
     }
 }
 

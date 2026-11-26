@@ -1,10 +1,18 @@
+//! A frame rendered into a texture of its own and read back, without presenting: the
+//! `frame-capture` feature's window capture, and the surface-free renderer of GPUI's visual
+//! tests and benchmarks (`test-support`).
+
+#[cfg(feature = "test-support")]
 use std::sync::Arc;
 
 use gpui::{DevicePixels, Scene, Size};
 
+#[cfg(feature = "test-support")]
 use crate::{WgpuAtlas, WgpuContext};
 
-use super::{WgpuRenderer, WgpuSurfaceConfig};
+use super::WgpuRenderer;
+#[cfg(feature = "test-support")]
+use super::WgpuSurfaceConfig;
 
 struct OffscreenTarget {
     texture: wgpu::Texture,
@@ -15,6 +23,7 @@ struct OffscreenTarget {
 }
 
 impl WgpuRenderer {
+    #[cfg(feature = "test-support")]
     pub(super) fn new_headless(
         context: &WgpuContext,
         size: Size<DevicePixels>,
@@ -145,11 +154,13 @@ impl OffscreenTarget {
 }
 
 /// Surface-free renderer used by GPUI visual tests and benchmarks.
+#[cfg(feature = "test-support")]
 pub struct WgpuHeadlessRenderer {
     renderer: WgpuRenderer,
     target: Option<OffscreenTarget>,
 }
 
+#[cfg(feature = "test-support")]
 impl WgpuHeadlessRenderer {
     pub fn new() -> anyhow::Result<Self> {
         let context = WgpuContext::new_headless(None)?;
@@ -212,6 +223,7 @@ impl WgpuHeadlessRenderer {
     }
 }
 
+#[cfg(feature = "test-support")]
 impl gpui::PlatformHeadlessRenderer for WgpuHeadlessRenderer {
     fn render_scene_to_image(
         &mut self,
